@@ -52,8 +52,9 @@ test('exclusão em lote exige a palavra EXCLUIR e respeita o filtro de filial', 
   assert.ok(a > 0 && b > 0);
   assert.equal((await admin.req('POST', '/api/admin/responses/delete-filtered', { body: { filter: { branchId: String(branchB) } } })).status, 400);
   assert.equal((await admin.req('POST', '/api/admin/responses/delete-filtered', { body: { confirm: 'excluir', filter: { branchId: String(branchB) } } })).status, 400);
+  assert.equal((await admin.req('POST', '/api/admin/responses/delete-filtered', { body: { confirm: 'EXCLUIR', filter: { branchId: String(branchB) } } })).status, 403, 'sem a senha');
   assert.equal(count('branch_id = ?', branchB), b);
-  const r = await admin.req('POST', '/api/admin/responses/delete-filtered', { body: { confirm: 'EXCLUIR', filter: { branchId: String(branchB) } } });
+  const r = await admin.req('POST', '/api/admin/responses/delete-filtered', { body: { confirm: 'EXCLUIR', password: 'SenhaForte123', filter: { branchId: String(branchB) } } });
   assert.equal(r.status, 200, r.text);
   assert.equal(r.json.deleted, b);
   assert.equal(count('branch_id = ?', branchB), 0);

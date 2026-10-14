@@ -93,7 +93,8 @@ test('LGPD: só admin acessa pedidos do titular; busca por telefone em qualquer 
   const ex = await admin.req('POST', '/api/admin/privacy/export', { body: { email: 'MARIA@cliente.com' } });
   assert.equal(ex.json.registros[0].contato.telefone, '11988887777');
   assert.equal((await admin.req('POST', '/api/admin/privacy/erase', { body: { email: 'maria@cliente.com' } })).status, 400, 'exige confirmação');
-  const er = await admin.req('POST', '/api/admin/privacy/erase', { body: { email: 'maria@cliente.com', confirm: true } });
+  assert.equal((await admin.req('POST', '/api/admin/privacy/erase', { body: { email: 'maria@cliente.com', confirm: true } })).status, 403, 'exige a senha');
+  const er = await admin.req('POST', '/api/admin/privacy/erase', { body: { email: 'maria@cliente.com', confirm: true, password: 'SenhaForte123' } });
   assert.equal(er.json.erased, 1);
   assert.equal((await admin.req('POST', '/api/admin/privacy/search', { body: { phone: '11988887777' } })).json.length, 0);
   const r = get('SELECT * FROM responses WHERE anonymized_at IS NOT NULL LIMIT 1');

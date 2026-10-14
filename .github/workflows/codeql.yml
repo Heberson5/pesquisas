@@ -1,0 +1,32 @@
+name: CodeQL
+
+# Análise estática de segurança do código (injeção, XSS, caminhos, segredos no código...).
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: '27 6 * * 1'
+
+permissions:
+  contents: read
+
+jobs:
+  analisar:
+    name: Análise de segurança (CodeQL)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: github/codeql-action/init@v3
+        with:
+          languages: javascript-typescript
+          queries: security-extended
+      - uses: github/codeql-action/analyze@v3
+        with:
+          category: /language:javascript-typescript

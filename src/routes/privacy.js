@@ -9,7 +9,7 @@ const { requireUser, requireCompany, requirePerm } = require('../auth');
 const { P } = require('../permissions');
 const { bad, str } = require('../validate');
 const { normPhone, normEmail } = require('../vault');
-const { decryptFor, lookupFor } = require('../companies');
+const { decryptFor, lookupFor, lookupAllFor } = require('../companies');
 const { scope, placeholders } = require('../scope');
 const { isEmail } = require('../notify');
 const { rateLimiter } = require('../security');
@@ -25,11 +25,14 @@ function matches(user, body) {
   if (!phone && !email) throw bad('Informe telefone ou e-mail.');
   const cid = user.companyId;
   const s = scope(user);
+  // Durante a rotação da chave mestra, busca também pelo identificador antigo.
+  const ph = phone ? lookupAllFor(cid, 'phone:' + phone) : ['-'];
+  const em = email ? lookupAllFor(cid, 'email:' + email) : ['-'];
   const rows = all(`SELECT r.id, r.submitted_at, r.contact_name_enc, r.contact_phone_enc, r.contact_email_enc, r.contact_consent_at, b.name AS branch, s.title AS survey
       FROM responses r JOIN branches b ON b.id = r.branch_id JOIN surveys s ON s.id = r.survey_id
-      WHERE r.company_id = ? AND r.anonymized_at IS NULL AND (r.contact_phone_lookup = ? OR r.contact_email_lookup = ?)
+      WHERE r.company_id = ? AND r.anonymized_at IS NULL AND (r.contact_phone_lookup IN (${placeholders(ph)}) OR r.contact_email_lookup IN (${placeholders(em)}))
       ${s ? (s.length ? `AND r.branch_id IN (${placeholders(s)})` : 'AND 0') : ''} ORDER BY r.submitted_at`,
-  cid, phone ? lookupFor(cid, 'phone:' + phone) : '-', email ? lookupFor(cid, 'email:' + email) : '-', ...(s || []));
+  cid, ...ph, ...em, ...(s || []));
   return { rows, key: { phone: !!phone, email: !!email } };
 }
 
@@ -71,6 +74,7 @@ function anonymize(companyId, ids) {
 
 router.post('/erase', (req, res) => {
   if (req.body?.confirm !== true) throw bad('Confirme a exclusão.');
+  require('./auth').confirmSensitive(req);
   const { rows } = matches(req.user, req.body);
   anonymize(req.user.companyId, rows.map((r) => r.id));
   auditReq(req, 'privacy.erase', { count: rows.length });

@@ -116,7 +116,21 @@
   async function afterLogin(r) {
     csrf = r.csrf;
     if (r.mfaSetupRequired) return showMfaSetup(true);
-    await loadMe(); route();
+    await loadMe(); await route();
+    if (me?.whatsNew && !document.querySelector('.modal-bg')) showWhatsNew();
+  }
+
+  // Novidades da versão (uma vez por versão, só com o que o perfil da pessoa pode usar).
+  async function showWhatsNew() {
+    try {
+      const m = await api('/manual');
+      const v = m.versions[0];
+      const seen = () => api('/manual/seen', { method: 'POST' }).then(() => { me.whatsNew = false; }).catch(() => {});
+      if (!v) return seen();
+      modal(`Novidades da versão ${v.version}`, h('div', {}, h('p', { class: 'muted' }, v.title), h('ul', { class: 'news' }, v.items.map((t) => h('li', {}, t)))),
+        [{ label: 'Ver o manual', cls: 'secondary', onClick: async (close) => { await seen(); close(); location.hash = '#/manual'; } },
+          { label: 'Entendi', onClick: async (close) => { await seen(); close(); } }]);
+    } catch { /* sem novidades */ }
   }
 
   async function showLogin(msg) {
@@ -125,7 +139,7 @@
     const { form, err } = formOf([h('label', { class: 'f' }, 'E-mail', email), h('label', { class: 'f' }, 'Senha', pw)], 'Entrar', async () => {
       try {
         const r = await api('/login', { method: 'POST', body: { email: email.value, password: pw.value } });
-        if (r.mfaRequired) return showMfaStep(r.challenge);
+        if (r.mfaRequired) return showMfaStep(r.challenge, r.webauthn);
         await afterLogin(r);
       } catch (ex) { pw.value = ''; throw ex; }
     });
@@ -185,14 +199,30 @@
     cnpj.focus();
   }
 
-  async function showMfaStep(challenge) {
+  // Chaves de acesso (passkeys): conversões base64url ⇄ bytes para a API WebAuthn do navegador.
+  const b64uToBuf = (s) => Uint8Array.from(atob(s.replace(/-/g, '+').replace(/_/g, '/') + '==='.slice((s.length + 3) % 4)), (c) => c.charCodeAt(0));
+  const bufToB64u = (b) => btoa(String.fromCharCode(...new Uint8Array(b))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  const passkeySupported = () => !!window.PublicKeyCredential && !!navigator.credentials;
+
+  async function showMfaStep(challenge, webauthn = null) {
     const code = h('input', { inputmode: 'numeric', autocomplete: 'one-time-code', maxlength: '11', placeholder: '000000', class: 'code-input' });
-    const { form } = formOf([h('label', { class: 'f' }, 'Código de 6 dígitos', code)], 'Confirmar', async () => {
+    const { form, err } = formOf([h('label', { class: 'f' }, 'Código de 6 dígitos', code)], 'Confirmar', async () => {
       await afterLogin(await api('/login/mfa', { method: 'POST', body: { challenge, code: code.value } }));
     });
+    const usePasskey = async () => {
+      try {
+        const cred = await navigator.credentials.get({ publicKey: { challenge: b64uToBuf(webauthn.challenge), rpId: webauthn.rpId, timeout: webauthn.timeout,
+          userVerification: 'required', allowCredentials: webauthn.allowCredentials.map((c) => ({ type: 'public-key', id: b64uToBuf(c.id) })) } });
+        if (!cred) return;
+        await afterLogin(await api('/login/webauthn', { method: 'POST', body: { challenge, credential: { id: cred.id, type: cred.type, response: {
+          clientDataJSON: bufToB64u(cred.response.clientDataJSON), authenticatorData: bufToB64u(cred.response.authenticatorData), signature: bufToB64u(cred.response.signature) } } } }));
+      } catch (ex) { err.textContent = ex.name === 'NotAllowedError' ? 'Operação cancelada. Tente de novo ou use o código.' : ex.message; }
+    };
     await loginShell('Verificação em duas etapas', 'Abra o aplicativo autenticador no celular e digite o código. Sem o celular? Use um dos códigos de recuperação.',
+      webauthn && passkeySupported() ? h('div', {}, h('button', { class: 'btn', type: 'button', onclick: usePasskey }, icon('key', 18), 'Entrar com chave de acesso (biometria/PIN)'),
+        h('p', { class: 'small muted center' }, 'ou digite o código')) : null,
       form, h('a', { href: '#', class: 'small', onclick: (e) => { e.preventDefault(); showLogin(); } }, 'Voltar'));
-    code.focus();
+    if (webauthn && passkeySupported()) usePasskey(); else code.focus();
   }
 
   async function showForgot(prefill = '') {
@@ -275,6 +305,7 @@
     const perms = new Set(me.permissions || []);
     me.can = (p) => perms.has(p);
     me.company = r.company; me.acting = r.acting; me.grantable = r.grantable || [];
+    me.whatsNew = !!r.whatsNew;
     for (const k of Object.keys(cache)) delete cache[k];
     const b = settings || r.platform;
     applyBranding({ companyName: b.companyName, primaryColor: b.primaryColor, accentColor: b.accentColor,
@@ -310,15 +341,17 @@
     ['plano', 'Plano e uso', pageMyPlan, 'settings.manage', 'Administração'],
     ['faturamento', 'Faturamento', pageBilling, () => true, 'Administração'],
     ['configuracoes', 'Configurações', pageSettings, 'settings.manage', 'Administração'],
+    ['lgpd', 'Pedidos LGPD', pagePrivacy, () => me.can('privacy.manage') && !me.can('settings.manage'), 'Administração'],
     ['auditoria', 'Auditoria', pageAudit, 'audit.view', 'Administração'],
     ['conta', 'Minha conta', pageAccount, () => true, 'Administração'],
+    ['manual', 'Manual e novidades', pageManual, () => true, 'Ajuda'],
   ];
   const menuIcon = (id) => settings?.menuIcons?.[id] || window.Icons.MENU_DEFAULTS[id];
 
   function layout(active, content) {
     const collapsed = prefs.get('sidebar', 'open') === 'collapsed';
     const shell = h('div', { class: 'layout' + (collapsed ? ' collapsed' : '') });
-    const visible = PAGES.filter((p) => p[0] === 'conta' || canSee(p));
+    const visible = PAGES.filter((p) => p[0] === 'conta' || p[0] === 'manual' || canSee(p));
     const groups = [...new Set(visible.map((p) => p[4]))];
     const dark = document.documentElement.dataset.theme === 'dark';
     const toggleCollapse = () => {
@@ -365,7 +398,7 @@
     if (location.hash === '#/cadastro' && !me) return showSignup();
     if (!me) { try { await loadMe(); } catch { return; } }
     const [, name = 'dashboard', param] = location.hash.split('/');
-    const visible = PAGES.filter((p) => p[0] === 'conta' || canSee(p));
+    const visible = PAGES.filter((p) => p[0] === 'conta' || p[0] === 'manual' || canSee(p));
     const page = visible.find((p) => p[0] === name) || (locked() ? visible.find((p) => p[0] === 'faturamento') : null) || visible[0];
     const container = h('div', {}, h('p', { class: 'muted' }, 'Carregando…'));
     layout(page[0], container);
@@ -651,13 +684,14 @@
     // Apaga tudo o que o filtro atual mostra (limpeza dos testes). Exige digitar EXCLUIR.
     const deleteFiltered = (total) => {
       const word = h('input', { placeholder: 'EXCLUIR', autocomplete: 'off' });
+      const conf = confirmFields();
       modal('Excluir respostas filtradas', h('div', {},
         h('p', {}, `Serão excluídas definitivamente ${total} respostas (com os casos e anotações ligados a elas), conforme os filtros da tela: período, unidade, pesquisa e canal.`),
-        h('p', { class: 'small muted' }, 'Isso não pode ser desfeito. Faça um backup antes se tiver dúvida. Digite EXCLUIR para confirmar.'), word),
+        h('p', { class: 'small muted' }, 'Isso não pode ser desfeito. Faça um backup antes se tiver dúvida. Digite EXCLUIR para confirmar.'), word, conf.el),
       [{ label: 'Excluir definitivamente', cls: 'danger', onClick: async (close) => {
         try {
           const f = Object.fromEntries(Object.entries(filterState).filter(([, v]) => v));
-          const r = await api('/responses/delete-filtered', { method: 'POST', body: { confirm: word.value.trim(), filter: f } });
+          const r = await api('/responses/delete-filtered', { method: 'POST', body: { confirm: word.value.trim(), filter: f, ...conf.value() } });
           close(); toast(`${r.deleted} respostas excluídas.`); page = 1; load();
         } catch (ex) { toast(ex.message, true); }
       } }]);
@@ -1598,9 +1632,11 @@
   }
 
   async function pagePlatformAudit() {
-    const rows = await api('/master/audit?limit=500');
+    const [rows, chk] = await Promise.all([api('/master/audit?limit=500'), api('/master/audit/verify')]);
     const ctx = { branches: new Map(), surveys: new Map(), users: new Map(), devices: new Map() };
-    return h('div', {}, pageHead('Auditoria da plataforma', 'Ações do Master e acessos fora das empresas (cada empresa tem a própria auditoria)'),
+    return h('div', {}, pageHead('Auditoria da plataforma', 'Ações do Master e acessos fora das empresas (cada empresa tem a própria auditoria)',
+      h('span', { class: 'badge ' + (chk.ok ? 'ok' : 'off') }, icon('shield', 14), chk.ok ? ` Todas as ${chk.chains.length} correntes íntegras` : ' ALTERAÇÃO DETECTADA')),
+      chk.ok ? null : h('div', { class: 'card warn-card' }, h('b', {}, 'Registros alterados fora do sistema: '), chk.chains.filter((c) => !c.ok).map((c) => `${c.name} (a partir do #${c.brokenAt})`).join('; ')),
       h('div', { class: 'card table-wrap' }, h('table', {},
         h('thead', {}, h('tr', {}, ['Quando', 'Quem', 'O que aconteceu', 'De onde'].map((t) => h('th', {}, t)))),
         h('tbody', {}, rows.length ? rows.map((r) => { const e = auditEvent(r, ctx); return h('tr', { class: e.tone ? 'tone-' + e.tone : '' },
@@ -1930,6 +1966,24 @@
   async function securityTab(st) {
     const privacy = h('textarea', { rows: '5', maxlength: '1500', value: st.privacyText, oninput: (e) => { st.privacyText = e.target.value; } });
     const num = (obj, k, min, max) => h('input', { type: 'number', min: String(min), max: String(max), value: obj[k], oninput: (e) => { obj[k] = Number(e.target.value); } });
+    return h('div', {},
+      h('div', { class: 'grid c2' },
+        h('div', { class: 'card' }, h('h2', {}, 'Acesso ao painel'),
+          chk(st.requireAdminMfa, (v) => { st.requireAdminMfa = v; }, 'Exigir verificação em duas etapas (2FA) de administradores'),
+          h('p', { class: 'small muted' }, 'Recomendado. Com isso ligado, o administrador sem 2FA é obrigado a configurá-lo no próximo login.')),
+        h('div', { class: 'card' }, h('h2', {}, 'Prazo de guarda dos dados (LGPD)'),
+          h('div', { class: 'form-grid' },
+            h('label', { class: 'f' }, 'Contatos (meses)', num(st.retention, 'contactsMonths', 1, 60)),
+            h('label', { class: 'f' }, 'Comentários (meses)', num(st.retention, 'commentsMonths', 1, 120)),
+            h('label', { class: 'f' }, 'Auditoria (meses)', num(st.retention, 'auditMonths', 6, 120))),
+          h('p', { class: 'small muted' }, 'Depois do prazo, os dados são apagados automaticamente. As notas numéricas (sem dados pessoais) são mantidas para o histórico do NPS.'))),
+      h('div', { class: 'card' }, h('h2', {}, 'Aviso de privacidade exibido no tablet e no QR Code'), privacy),
+      privacyRequestCard());
+  }
+
+  // Pedido do titular (LGPD): localizar, exportar e excluir os dados de um cliente. Usado em Configurações e na
+  // tela "Pedidos LGPD" (para gestores com essa permissão).
+  function privacyRequestCard() {
     const phone = h('input', { placeholder: 'Telefone do titular' });
     const mail = h('input', { type: 'email', placeholder: 'ou e-mail' });
     const results = h('div');
@@ -1945,28 +1999,20 @@
               const res = await fetch('/api/admin/privacy/export', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrf }, body: JSON.stringify(query()), credentials: 'same-origin' });
               const a = h('a', { href: URL.createObjectURL(await res.blob()), download: 'dados-titular.json' }); document.body.append(a); a.click(); a.remove();
             } }, icon('download', 14), 'Exportar dados (JSON)'),
-            h('button', { class: 'btn danger sm', onclick: async () => {
-              if (!confirm('Excluir definitivamente os dados pessoais e comentários desta pessoa? As notas numéricas são mantidas de forma anônima.')) return;
-              try { const e = await api('/privacy/erase', { method: 'POST', body: { ...query(), confirm: true } }); toast(`${e.erased} registro(s) anonimizado(s).`); results.replaceChildren(); } catch (ex) { toast(ex.message, true); }
+            h('button', { class: 'btn danger sm', onclick: () => {
+              const conf = confirmFields();
+              modal('Excluir dados do titular', h('div', {}, h('p', {}, 'Excluir definitivamente os dados pessoais e comentários desta pessoa? As notas numéricas são mantidas de forma anônima.'), conf.el),
+                [{ label: 'Excluir dados', cls: 'danger', onClick: async (close) => {
+                  try { const e = await api('/privacy/erase', { method: 'POST', body: { ...query(), confirm: true, ...conf.value() } }); close(); toast(`${e.erased} registro(s) anonimizado(s).`); results.replaceChildren(); } catch (ex) { toast(ex.message, true); }
+                } }]);
             } }, 'Excluir dados'))) : h('p', { class: 'muted' }, 'Nenhum registro com esse contato.'));
       } catch (ex) { toast(ex.message, true); }
     };
-    return h('div', {},
-      h('div', { class: 'grid c2' },
-        h('div', { class: 'card' }, h('h2', {}, 'Acesso ao painel'),
-          chk(st.requireAdminMfa, (v) => { st.requireAdminMfa = v; }, 'Exigir verificação em duas etapas (2FA) de administradores'),
-          h('p', { class: 'small muted' }, 'Recomendado. Com isso ligado, o administrador sem 2FA é obrigado a configurá-lo no próximo login.')),
-        h('div', { class: 'card' }, h('h2', {}, 'Prazo de guarda dos dados (LGPD)'),
-          h('div', { class: 'form-grid' },
-            h('label', { class: 'f' }, 'Contatos (meses)', num(st.retention, 'contactsMonths', 1, 60)),
-            h('label', { class: 'f' }, 'Comentários (meses)', num(st.retention, 'commentsMonths', 1, 120)),
-            h('label', { class: 'f' }, 'Auditoria (meses)', num(st.retention, 'auditMonths', 6, 120))),
-          h('p', { class: 'small muted' }, 'Depois do prazo, os dados são apagados automaticamente. As notas numéricas (sem dados pessoais) são mantidas para o histórico do NPS.'))),
-      h('div', { class: 'card' }, h('h2', {}, 'Aviso de privacidade exibido no tablet e no QR Code'), privacy),
-      h('div', { class: 'card' }, h('h2', {}, 'Pedido do titular (LGPD)'),
-        h('p', { class: 'small muted' }, 'Quando um cliente pedir acesso ou exclusão dos dados dele, localize pelo telefone ou e-mail informado.'),
-        h('div', { class: 'row' }, phone, mail, h('button', { class: 'btn secondary', onclick: search }, 'Localizar')), results));
+    return h('div', { class: 'card' }, h('h2', {}, 'Pedido do titular (LGPD)'),
+      h('p', { class: 'small muted' }, 'Quando um cliente pedir acesso ou exclusão dos dados dele, localize pelo telefone ou e-mail informado.'),
+      h('div', { class: 'row' }, phone, mail, h('button', { class: 'btn secondary', onclick: search }, 'Localizar')), results);
   }
+  async function pagePrivacy() { return h('div', {}, pageHead('Pedidos LGPD', 'Acesso e exclusão dos dados de um cliente, a pedido dele'), privacyRequestCard()); }
 
   // ------------------------------------------------------------ auditoria
   // ------------------------------------------------------------ auditoria (histórico em português simples)
@@ -2027,6 +2073,10 @@
       case 'billing.credentials': return E('cadastros', 'warn', 'Alterou as credenciais do Mercado Pago');
       case 'billing.webhook_rejected': return E('acesso', 'bad', 'Notificação de pagamento recusada', d.reason || '');
       case 'billing.run_manual': return E('dados', '', 'Rodou a rotina de cobrança manualmente');
+      case 'session.revoked': return E('conta', '', `Encerrou ${d.count} sessão(ões) em outros aparelhos`);
+      case 'webauthn.added': return E('conta', 'ok', `Cadastrou uma chave de acesso (passkey): ${d.name || ''}`);
+      case 'webauthn.removed': return E('conta', 'warn', 'Removeu uma chave de acesso (passkey)');
+      case 'login.webauthn_failed': return E('acesso', 'warn', 'Chave de acesso recusada no login');
       case 'invite.accepted': return E('conta', 'ok', 'Aceitou o convite e criou a senha');
       case 'confirm.bad_password': return E('conta', 'warn', 'Senha errada ao confirmar uma ação sensível');
       case 'confirm.bad_code': return E('conta', 'warn', 'Código do 2FA errado ao confirmar uma ação sensível');
@@ -2111,10 +2161,48 @@
     [cat, onlyAlerts].forEach((el) => el.addEventListener('change', draw));
     search.addEventListener('input', draw);
     draw();
-    return h('div', {}, pageHead('Auditoria', 'Quem fez o quê no sistema — as últimas 500 ações, em linguagem simples'),
+    const integrity = me.can('settings.manage') ? await api('/audit/verify').catch(() => null) : null;
+    return h('div', {}, pageHead('Auditoria', 'Quem fez o quê no sistema — as últimas 500 ações, em linguagem simples',
+      integrity ? h('span', { class: 'badge ' + (integrity.ok ? 'ok' : 'off'), title: 'Cada registro guarda o resumo do anterior: alterações escondidas no banco quebram a corrente.' },
+        icon('shield', 14), integrity.ok ? ` Registros íntegros (${integrity.rows})` : ` ALTERAÇÃO DETECTADA no registro #${integrity.brokenAt}`) : null),
       h('div', { class: 'card filters' }, h('label', { class: 'f' }, 'Tipo', cat), h('label', { class: 'f' }, 'Buscar', search),
         h('label', { class: 'chk' }, onlyAlerts, 'Mostrar só o que merece atenção')),
       list);
+  }
+
+  // ------------------------------------------------------------ notas de versão e manual
+  let manualTab = 'manual';
+  async function pageManual() {
+    const m = await api('/manual');
+    const body = h('div');
+    const search = h('input', { type: 'search', placeholder: 'Buscar no manual (ex.: QR Code, tablet, senha)…' });
+    const zoom = (img) => modal(img.caption, h('img', { class: 'manual-zoom', src: img.url, alt: img.caption }), []);
+    const section = (s) => h('div', { class: 'card manual-sec', id: 'm-' + s.id },
+      h('h2', {}, s.title), s.intro ? h('p', {}, s.intro) : null,
+      s.steps?.length ? h('ol', { class: 'steps' }, s.steps.map((t) => h('li', {}, t))) : null,
+      s.images.length ? h('div', { class: 'manual-imgs' }, s.images.map((i) => h('figure', {}, h('img', { src: i.url, alt: i.caption, loading: 'lazy', onclick: () => zoom(i) }), h('figcaption', { class: 'small muted' }, i.caption)))) : null,
+      s.tips?.length ? h('div', { class: 'manual-tips small' }, s.tips.map((t) => h('p', {}, h('b', {}, 'Dica: '), t))) : null);
+    const draw = () => {
+      if (manualTab === 'novidades') {
+        body.replaceChildren(...m.versions.map((v) => h('div', { class: 'card' }, h('h2', {}, `Versão ${v.version} — ${v.title}`), h('p', { class: 'small muted' }, fmtDay(Date.parse(v.date + 'T12:00:00'))),
+          h('ul', { class: 'news' }, v.items.map((t) => h('li', {}, t))))));
+        return;
+      }
+      const q = search.value.trim().toLowerCase();
+      const list = m.sections.filter((s) => !q || JSON.stringify([s.title, s.intro, s.steps, s.tips]).toLowerCase().includes(q));
+      const groups = [...new Set(list.map((s) => s.group))];
+      body.replaceChildren(
+        h('div', { class: 'card' }, h('h2', {}, 'Neste manual'), groups.length ? groups.map((g) => h('div', { class: 'manual-toc' }, h('b', {}, g + ': '),
+          list.filter((s) => s.group === g).map((s) => h('a', { href: '#/manual', onclick: (e) => { e.preventDefault(); document.getElementById('m-' + s.id)?.scrollIntoView({ behavior: 'smooth' }); } }, s.title)).flatMap((a, i) => (i ? [' · ', a] : [a]))))
+          : h('p', { class: 'muted' }, 'Nada encontrado.')),
+        ...list.map(section));
+    };
+    search.addEventListener('input', draw);
+    const tabs = h('div', { class: 'tabs' }, [['manual', 'Manual', 'list'], ['novidades', 'Notas de versão', 'star']].map(([k, label, ic]) => h('button', { class: manualTab === k ? 'active' : '',
+      onclick: () => { manualTab = k; tabs.querySelectorAll('button').forEach((b, i) => b.classList.toggle('active', ['manual', 'novidades'][i] === k)); search.parentElement.classList.toggle('hidden', k !== 'manual'); draw(); } }, icon(ic, 16), label)));
+    draw();
+    return h('div', {}, pageHead('Notas de versão e manual', `Versão ${m.version} · mostrando só o que o seu perfil pode usar`), tabs,
+      h('div', { class: 'card filters' + (manualTab === 'manual' ? '' : ' hidden') }, h('label', { class: 'f' }, 'Buscar', search)), body);
   }
 
   // ------------------------------------------------------------ minha conta
@@ -2133,6 +2221,36 @@
       try { await api('/me/notifications', { method: 'PUT', body: { [key]: e.target.checked } }); me.notify[key] = e.target.checked; toast('Preferência salva.'); } catch (ex) { toast(ex.message, true); }
     } }), label);
     const wa = h('input', { value: me.whatsapp || '', placeholder: '5511999990000', inputmode: 'numeric', autocomplete: 'tel' });
+    const [sess, keys] = await Promise.all([api('/me/sessions'), mfa.enabled ? api('/webauthn') : []]);
+    const addPasskey = () => askPw('Cadastrar chave de acesso', true, async (p, c, close) => {
+      const opt = await api('/webauthn/register/options', { method: 'POST', body: { password: p, code: c } });
+      close();
+      try {
+        const cred = await navigator.credentials.create({ publicKey: { ...opt, challenge: b64uToBuf(opt.challenge), user: { ...opt.user, id: b64uToBuf(opt.user.id) },
+          excludeCredentials: opt.excludeCredentials.map((x) => ({ type: 'public-key', id: b64uToBuf(x.id) })) } });
+        const name = prompt('Nome desta chave (ex.: Notebook, Celular):', 'Minha chave') || 'Minha chave';
+        await api('/webauthn/register', { method: 'POST', body: { name, credential: { id: cred.id, type: cred.type,
+          response: { clientDataJSON: bufToB64u(cred.response.clientDataJSON), attestationObject: bufToB64u(cred.response.attestationObject) } } } });
+        toast('Chave de acesso cadastrada.'); route();
+      } catch (ex) { toast(ex.name === 'NotAllowedError' ? 'Cadastro cancelado.' : ex.message, true); }
+    });
+    const uaShort = (ua) => { const s = String(ua || ''); const os = /Windows/.test(s) ? 'Windows' : /iPhone|iPad/.test(s) ? 'iPhone/iPad' : /Android/.test(s) ? 'Android' : /Mac OS X/.test(s) ? 'Mac' : /Linux/.test(s) ? 'Linux' : '';
+      const br = /Edg\//.test(s) ? 'Edge' : /Firefox\//.test(s) ? 'Firefox' : /Chrome\//.test(s) ? 'Chrome' : /Safari\//.test(s) ? 'Safari' : 'Navegador'; return `${br}${os ? ' · ' + os : ''}`; };
+    const securityCards = h('div', { class: 'grid c2' },
+      h('div', { class: 'card' }, h('div', { class: 'topbar' }, h('h2', {}, 'Aparelhos conectados'),
+        sess.sessions.length > 1 ? h('button', { class: 'btn secondary sm', onclick: async () => {
+          try { const r = await api('/me/sessions/revoke-others', { method: 'POST' }); toast(`${r.removed} sessão(ões) encerrada(s).`); route(); } catch (ex) { toast(ex.message, true); }
+        } }, 'Sair de todos os outros') : null),
+        h('div', { class: 'table-wrap' }, h('table', { class: 'small' }, h('thead', {}, h('tr', {}, ['Aparelho', 'IP', 'Último uso', ''].map((t) => h('th', {}, t)))),
+          h('tbody', {}, sess.sessions.map((x) => h('tr', {}, h('td', {}, uaShort(x.user_agent), x.current ? h('span', { class: 'badge ok' }, 'este') : null), h('td', {}, x.ip || '—'), h('td', {}, fmtDate(x.last_seen_at)),
+            h('td', {}, x.current ? null : h('button', { class: 'btn secondary sm', onclick: async () => { try { await api('/me/sessions/' + x.id, { method: 'DELETE' }); route(); } catch (ex) { toast(ex.message, true); } } }, 'Encerrar'))))))),
+        h('p', { class: 'small muted' }, 'Avisamos por e-mail quando sua conta é acessada de um aparelho ou rede novos. Não reconhece um acesso? Troque a senha (encerra tudo).')),
+      h('div', { class: 'card' }, h('h2', {}, 'Chaves de acesso (passkeys)'),
+        h('p', { class: 'small muted' }, 'Entre confirmando com a digital, o rosto ou o PIN do aparelho, em vez de digitar o código. Funciona só no endereço verdadeiro do painel: protege contra sites falsos.'),
+        !mfa.enabled ? h('p', { class: 'small' }, 'Ative primeiro a verificação em duas etapas.') : !passkeySupported() ? h('p', { class: 'small' }, 'Este navegador não suporta chaves de acesso.') : null,
+        keys.length ? h('ul', { class: 'small' }, keys.map((k) => h('li', {}, h('b', {}, k.name), ` — cadastrada em ${fmtDay(k.created_at)}${k.last_used_at ? ', último uso ' + fmtDate(k.last_used_at) : ''} `,
+          h('button', { class: 'btn secondary sm', onclick: () => askPw('Remover chave de acesso', true, async (p, c, close) => { await api('/webauthn/' + k.id, { method: 'DELETE', body: { password: p, code: c } }); close(); toast('Chave removida.'); route(); }) }, 'Remover')))) : null,
+        mfa.enabled && passkeySupported() ? h('button', { class: 'btn secondary', onclick: addPasskey }, icon('key', 16), 'Cadastrar chave de acesso') : null));
     return h('div', {}, pageHead('Minha conta', me.email),
       h('div', { class: 'grid c2' },
         h('div', { class: 'card' }, h('h2', {}, 'Verificação em duas etapas (2FA)'),
@@ -2158,6 +2276,7 @@
             h('div', { class: 'row' }, h('button', { class: 'btn secondary sm', onclick: async () => {
               try { await api('/me/notifications', { method: 'PUT', body: { whatsapp: wa.value } }); toast('WhatsApp salvo.'); me = null; await loadMe(); } catch (ex) { toast(ex.message, true); }
             } }, 'Salvar WhatsApp'))))),
+      securityCards,
       h('div', { class: 'card' }, h('h2', {}, 'Trocar senha'), h('div', { class: 'form-grid' },
         h('label', { class: 'f' }, 'Senha atual', cur), h('label', { class: 'f' }, 'Nova senha', pw), h('label', { class: 'f' }, 'Repita a nova senha', pw2)),
       h('div', { class: 'row' }, h('button', { class: 'btn', onclick: async () => {

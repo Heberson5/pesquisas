@@ -13,5 +13,8 @@
 	}
 	reverse_proxy app:3000 {
 		header_up X-Forwarded-For {remote_host}
+		# Com Cloudflare na frente (docs/SEGURANCA.md), troque a linha acima por:
+		# header_up X-Forwarded-For {http.request.header.CF-Connecting-IP}
+		# e libere as portas 80/443 só para os IPs da Cloudflare no firewall.
 	}
 }

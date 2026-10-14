@@ -19,6 +19,7 @@ COPY --chown=root:root package.json server.js ./
 COPY --chown=root:root src ./src
 COPY --chown=root:root public ./public
 COPY --chown=root:root scripts ./scripts
+COPY --chown=root:root manual ./manual
 USER node
 VOLUME ["/data"]
 EXPOSE 3000

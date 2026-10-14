@@ -224,11 +224,61 @@ CREATE TABLE billing_events (
 );`);
 }
 
+// ---------------------------------------------------------------- 5: segurança extra e manual
+// • Auditoria encadeada: cada registro guarda o resumo (SHA-256) do anterior da mesma empresa (ou da plataforma);
+//   alterar ou apagar um registro do meio quebra a corrente e aparece na verificação.
+// • Histórico de acessos (para avisar de login em aparelho/IP novo), chaves de acesso (passkeys) e
+//   "última versão vista" (notas de versão).
+function segurancaExtra(db) {
+  addColumn(db, 'audit_log', 'prev_hash TEXT');
+  addColumn(db, 'audit_log', 'hash TEXT');
+  addColumn(db, 'users', 'seen_version TEXT');
+  addColumn(db, 'mfa_challenges', 'wa_challenge TEXT');
+  db.exec(`CREATE TABLE login_history (
+  id INTEGER PRIMARY KEY,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  device_key TEXT NOT NULL,
+  ip TEXT,
+  user_agent TEXT,
+  at INTEGER NOT NULL
+);
+CREATE INDEX idx_login_history_user ON login_history(user_id, device_key, at);
+CREATE TABLE webauthn_credentials (
+  id INTEGER PRIMARY KEY,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  credential_id TEXT NOT NULL UNIQUE,
+  public_key_jwk TEXT NOT NULL,
+  alg INTEGER NOT NULL,
+  sign_count INTEGER NOT NULL DEFAULT 0,
+  name TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  last_used_at INTEGER
+);
+CREATE TABLE webauthn_challenges (
+  user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+  challenge TEXT NOT NULL,
+  created_at INTEGER NOT NULL
+);
+CREATE INDEX idx_audit_chain ON audit_log(company_id, id);`);
+  // Encadeia o que já existe (cada empresa e a plataforma têm a sua corrente).
+  const { auditHash } = require('./auditChain');
+  const last = new Map();
+  const upd = db.prepare('UPDATE audit_log SET prev_hash = ?, hash = ? WHERE id = ? /* tenant-ok: migração do banco */');
+  for (const r of db.prepare('SELECT * FROM audit_log ORDER BY id /* tenant-ok: migração do banco */').all()) {
+    const k = r.company_id ?? 0;
+    const prev = last.get(k) || null;
+    const h = auditHash(prev, r);
+    upd.run(prev, h, r.id);
+    last.set(k, h);
+  }
+}
+
 const MIGRATIONS = [
   { version: 1, name: 'multiempresa', up: multiempresa },
   { version: 2, name: 'cadastro_empresa', up: cadastroEmpresa },
   { version: 3, name: 'planos', up: planos },
   { version: 4, name: 'faturamento', up: faturamento },
+  { version: 5, name: 'seguranca_extra', up: segurancaExtra },
 ];
 
 function runMigrations(db) {

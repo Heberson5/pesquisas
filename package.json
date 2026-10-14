@@ -14,6 +14,8 @@
     "create-master": "node --disable-warning=ExperimentalWarning scripts/create-master.js",
     "create-company": "node --disable-warning=ExperimentalWarning scripts/create-company.js",
     "create-admin": "node --disable-warning=ExperimentalWarning scripts/create-admin.js",
+    "rotate-secret": "node --disable-warning=ExperimentalWarning scripts/rotate-secret.js",
+    "manual:prints": "node --disable-warning=ExperimentalWarning scripts/manual-screenshots.js",
     "seed:demo": "node --disable-warning=ExperimentalWarning scripts/seed-demo.js",
     "test": "node --disable-warning=ExperimentalWarning --test tests/*.test.js"
   },

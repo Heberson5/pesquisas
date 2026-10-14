@@ -310,9 +310,13 @@ const run = (sql, ...p) => db.prepare(sql).run(...p);
 
 // Auditoria. `where` diz de qual empresa (e unidade) é a ação e se foi o Master agindo dentro da empresa.
 function audit(userId, action, detail, ip, where = {}) {
-  run('INSERT INTO audit_log (at, user_id, action, detail, ip, company_id, branch_id, as_master) VALUES (?,?,?,?,?,?,?,?)',
-    Date.now(), userId ?? null, action, detail ? JSON.stringify(detail).slice(0, 2000) : null, ip ?? null,
-    where.companyId ?? null, where.branchId ?? null, where.asMaster ? 1 : 0);
+  const r = { at: Date.now(), user_id: userId ?? null, action, detail: detail ? JSON.stringify(detail).slice(0, 2000) : null, ip: ip ?? null,
+    company_id: where.companyId ?? null, branch_id: where.branchId ?? null, as_master: where.asMaster ? 1 : 0 };
+  // Encadeia com o último registro da mesma empresa (ou da plataforma). Leitura + gravação síncronas: sem disputa.
+  const prev = (r.company_id === null ? get('SELECT hash FROM audit_log WHERE company_id IS NULL ORDER BY id DESC LIMIT 1 /* tenant-ok: corrente da auditoria */')
+    : get('SELECT hash FROM audit_log WHERE company_id = ? ORDER BY id DESC LIMIT 1', r.company_id))?.hash ?? null;
+  run('INSERT INTO audit_log (at, user_id, action, detail, ip, company_id, branch_id, as_master, prev_hash, hash) VALUES (?,?,?,?,?,?,?,?,?,?)',
+    r.at, r.user_id, r.action, r.detail, r.ip, r.company_id, r.branch_id, r.as_master, prev, require('./auditChain').auditHash(prev, r));
 }
 
 // Auditoria a partir da requisição do painel (usuário, empresa em uso e IP já conhecidos).

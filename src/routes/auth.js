@@ -2,12 +2,13 @@
 // Autenticação do painel: login em duas etapas (senha + 2FA), recuperação de senha por e-mail
 // e gerenciamento do 2FA do próprio usuário.
 const express = require('express');
-const { get, run, tx, audit: auditRaw } = require('../db');
+const { get, all, run, tx, audit: auditRaw } = require('../db');
+const wa = require('../webauthn');
 const { hashPassword, verifyPassword, DUMMY_HASH, randomToken, sha256, passwordPolicyError, rateLimiter } = require('../security');
 const { createSession, destroyUserSessions, requireUser } = require('../auth');
 const { HttpError, bad } = require('../validate');
 const totp = require('../totp');
-const { encrypt, decrypt, lookup } = require('../vault');
+const { encrypt, decrypt, lookup, lookupAll } = require('../vault');
 const { getSettings, getPlatform, platformBranding } = require('../settings');
 const { queueEmail, renderEmail } = require('../notify');
 const { publicUrl } = require('../config');
@@ -56,7 +57,33 @@ function finishLogin(res, req, user) {
   const setupRequired = !user.totp_enabled && mfaRequiredFor(user);
   const csrf = createSession(res, user, req, { setupRequired });
   audit(user.id, 'login.ok', { mfa: !!user.totp_enabled }, req.ip);
+  try { loginAlert(user, req); } catch (e) { console.error('[alerta de login]', e.message); }
   return { user: publicUser(user), csrf, mfaSetupRequired: setupRequired };
+}
+
+// Aviso de acesso em aparelho novo: navegador/sistema + rede (/24) nunca vistos nos últimos 90 dias.
+const uaFamily = (ua) => {
+  const s = String(ua || '');
+  const os = /Windows/.test(s) ? 'Windows' : /iPhone|iPad/.test(s) ? 'iOS' : /Android/.test(s) ? 'Android' : /Mac OS X/.test(s) ? 'macOS' : /Linux/.test(s) ? 'Linux' : 'outro';
+  const br = /Edg\//.test(s) ? 'Edge' : /OPR\//.test(s) ? 'Opera' : /Firefox\//.test(s) ? 'Firefox' : /Chrome\//.test(s) ? 'Chrome' : /Safari\//.test(s) ? 'Safari' : 'navegador';
+  return `${br} no ${os}`;
+};
+const netOf = (ip) => (/^\d+\.\d+\.\d+\.\d+$/.test(ip || '') ? ip.split('.').slice(0, 3).join('.') : String(ip || '').split(':').slice(0, 4).join(':'));
+function loginAlert(user, req) {
+  const device = uaFamily(req.get('user-agent'));
+  const key = sha256(`${device}|${netOf(req.ip)}`);
+  const known = get('SELECT 1 FROM login_history WHERE user_id = ? AND device_key = ? AND at > ?', user.id, key, Date.now() - 90 * 86_400_000);
+  const first = !get('SELECT 1 FROM login_history WHERE user_id = ?', user.id);
+  run('INSERT INTO login_history (user_id, device_key, ip, user_agent, at) VALUES (?,?,?,?,?)', user.id, key, req.ip, String(req.get('user-agent') || '').slice(0, 300), Date.now());
+  run('DELETE FROM login_history WHERE user_id = ? AND at < ?', user.id, Date.now() - 180 * 86_400_000);
+  if (known || first) return; // o primeiro acesso da conta não gera aviso
+  const brand = brandOf(user);
+  const { html, text } = renderEmail({ brand, title: 'Novo acesso à sua conta',
+    intro: `Olá, ${user.name}. Sua conta foi acessada de um aparelho ou rede que não usava antes. Se foi você, não precisa fazer nada.`,
+    rows: [['Quando', new Date().toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' })], ['Aparelho', device], ['IP', String(req.ip || '')]],
+    button: { label: 'Ver acessos e encerrar sessões', url: `${publicUrl}/admin/#/conta` },
+    footer: 'Não reconhece? Troque a senha agora em Minha conta (isso encerra todas as sessões) e avise o administrador.' });
+  queueEmail({ to: user.email, subject: `${brand.companyName}: novo acesso à sua conta`, text, html, kind: 'login_alert', companyId: user.company_id ?? null });
 }
 
 // Etapa 1: e-mail e senha.
@@ -77,8 +104,13 @@ router.post('/login', loginLimiter, (req, res) => {
     // Senha correta, mas falta o código do app autenticador: devolve um desafio de uso único (5 min).
     const challenge = randomToken(32);
     run('DELETE FROM mfa_challenges WHERE user_id = ? OR created_at < ?', user.id, Date.now() - CHALLENGE_TTL);
-    run('INSERT INTO mfa_challenges (token_hash, user_id, created_at) VALUES (?,?,?)', sha256(challenge), user.id, Date.now());
-    return res.json({ mfaRequired: true, challenge });
+    // Se o usuário tem chave de acesso (passkey), oferece também esse caminho (mais rápido e à prova de phishing).
+    const creds = all('SELECT credential_id FROM webauthn_credentials WHERE user_id = ?', user.id);
+    const waChallenge = creds.length ? wa.newChallenge() : null;
+    run('INSERT INTO mfa_challenges (token_hash, user_id, created_at, wa_challenge) VALUES (?,?,?,?)', sha256(challenge), user.id, Date.now(), waChallenge);
+    return res.json({ mfaRequired: true, challenge,
+      webauthn: waChallenge ? { challenge: waChallenge, rpId: wa.relyingParty().rpId, timeout: 120000, userVerification: 'required',
+        allowCredentials: creds.map((c) => ({ type: 'public-key', id: c.credential_id })) } : null });
   }
   res.json(finishLogin(res, req, user));
 });
@@ -102,7 +134,8 @@ router.post('/login/mfa', loginLimiter, mfaLimiter, (req, res) => {
   } else {
     const norm = totp.normalizeRecovery(code);
     if (norm.length === 10) {
-      const r = run('UPDATE mfa_recovery_codes SET used_at = ? WHERE user_id = ? AND code_hash = ? AND used_at IS NULL', Date.now(), user.id, lookup('rc:' + norm));
+      const hashes = lookupAll('rc:' + norm); // durante a rotação da chave mestra, aceita também o código gravado com a anterior
+      const r = run(`UPDATE mfa_recovery_codes SET used_at = ? WHERE rowid = (SELECT rowid FROM mfa_recovery_codes WHERE user_id = ? AND used_at IS NULL AND code_hash IN (${hashes.map(() => '?').join(',')}) LIMIT 1)`, Date.now(), user.id, ...hashes);
       if (r.changes === 1) { valid = true; audit(user.id, 'mfa.recovery_code_used', null, req.ip); }
     }
   }
@@ -110,6 +143,30 @@ router.post('/login/mfa', loginLimiter, mfaLimiter, (req, res) => {
     run('UPDATE mfa_challenges SET attempts = attempts + 1 WHERE token_hash = ?', c.token_hash);
     registerFailure(user, req, 'login.mfa_failed');
     throw new HttpError(401, 'Código inválido.');
+  }
+  run('DELETE FROM mfa_challenges WHERE token_hash = ?', c.token_hash);
+  res.json(finishLogin(res, req, user));
+});
+
+// Etapa 2 com chave de acesso (passkey) no lugar do código de 6 dígitos.
+router.post('/login/webauthn', loginLimiter, mfaLimiter, (req, res) => {
+  const challenge = typeof req.body?.challenge === 'string' ? req.body.challenge : '';
+  const c = challenge.length <= 100 ? get('SELECT * FROM mfa_challenges WHERE token_hash = ?', sha256(challenge)) : null;
+  const expired = new HttpError(401, 'Sessão de login expirada. Entre novamente com e-mail e senha.');
+  if (!c || !c.wa_challenge || c.created_at < Date.now() - CHALLENGE_TTL || c.attempts >= 5) { if (c) run('DELETE FROM mfa_challenges WHERE token_hash = ?', c.token_hash); throw expired; }
+  const user = get('SELECT * FROM users WHERE id = ? /* tenant-ok: login */', c.user_id);
+  if (!user || !user.active || !user.totp_enabled || companyBlocked(user)) throw expired;
+  if (user.locked_until && user.locked_until > Date.now()) throw new HttpError(423, 'Conta temporariamente bloqueada por excesso de tentativas. Tente em 15 minutos.');
+  const cred = req.body?.credential;
+  const stored = typeof cred?.id === 'string' ? get('SELECT * FROM webauthn_credentials WHERE credential_id = ? AND user_id = ?', cred.id, user.id) : null;
+  try {
+    if (!stored) throw new Error('Chave de acesso não cadastrada nesta conta.');
+    const r = wa.verifyAssertion(cred, stored, { challenge: c.wa_challenge, ...wa.relyingParty() });
+    run('UPDATE webauthn_credentials SET sign_count = ?, last_used_at = ? WHERE id = ?', r.signCount, Date.now(), stored.id);
+  } catch (e) {
+    run('UPDATE mfa_challenges SET attempts = attempts + 1 WHERE token_hash = ?', c.token_hash);
+    registerFailure(user, req, 'login.webauthn_failed');
+    throw new HttpError(401, e.message);
   }
   run('DELETE FROM mfa_challenges WHERE token_hash = ?', c.token_hash);
   res.json(finishLogin(res, req, user));
@@ -222,6 +279,7 @@ router.post('/mfa/disable', requireUser, mfaLimiter, (req, res) => {
   tx(() => {
     run('UPDATE users SET totp_enabled = 0, totp_secret_enc = NULL, totp_last_step = NULL WHERE id = ? /* tenant-ok: login/2FA: conta do próprio usuário (e-mail é único na plataforma) */', u.id);
     run('DELETE FROM mfa_recovery_codes WHERE user_id = ?', u.id);
+    run('DELETE FROM webauthn_credentials WHERE user_id = ?', u.id);
   });
   audit(u.id, 'mfa.disabled', null, req.ip);
   res.json({ ok: true });
@@ -245,9 +303,48 @@ function confirmSensitive(req) {
   return u;
 }
 
+// ---------------------------------------------------------------- chaves de acesso (passkeys) do próprio usuário
+// Complementam o 2FA (exigem o aplicativo autenticador já ativo, que continua como reserva).
+router.get('/webauthn', requireUser, (req, res) => {
+  res.json(all('SELECT id, name, created_at, last_used_at FROM webauthn_credentials WHERE user_id = ? ORDER BY created_at', req.user.id));
+});
+router.post('/webauthn/register/options', requireUser, mfaLimiter, (req, res) => {
+  const u = confirmSensitive(req);
+  if (!u.totp_enabled) throw bad('Ative primeiro a verificação em duas etapas pelo aplicativo; a chave de acesso é um jeito mais rápido de confirmar.');
+  if (get('SELECT COUNT(*) AS n FROM webauthn_credentials WHERE user_id = ?', u.id).n >= 10) throw bad('Limite de 10 chaves por conta.');
+  const challenge = wa.newChallenge();
+  run('INSERT INTO webauthn_challenges (user_id, challenge, created_at) VALUES (?,?,?) ON CONFLICT(user_id) DO UPDATE SET challenge = excluded.challenge, created_at = excluded.created_at', u.id, challenge, Date.now());
+  const rp = wa.relyingParty();
+  res.json({ challenge, rp: { id: rp.rpId, name: brandOf(u).companyName }, user: { id: wa.b64u(Buffer.from(`u${u.id}`)), name: u.email, displayName: u.name },
+    pubKeyCredParams: [{ type: 'public-key', alg: -7 }, { type: 'public-key', alg: -257 }], timeout: 120000, attestation: 'none',
+    authenticatorSelection: { userVerification: 'required', residentKey: 'preferred' },
+    excludeCredentials: all('SELECT credential_id FROM webauthn_credentials WHERE user_id = ?', u.id).map((c) => ({ type: 'public-key', id: c.credential_id })) });
+});
+router.post('/webauthn/register', requireUser, mfaLimiter, (req, res) => {
+  const ch = get('SELECT * FROM webauthn_challenges WHERE user_id = ?', req.user.id);
+  run('DELETE FROM webauthn_challenges WHERE user_id = ?', req.user.id); // uso único
+  if (!ch || ch.created_at < Date.now() - 5 * 60_000) throw bad('O cadastro expirou. Comece de novo.');
+  const name = String(req.body?.name || 'Chave de acesso').replace(/[\u0000-\u001f]/g, '').trim().slice(0, 60) || 'Chave de acesso';
+  let r;
+  try { r = wa.verifyRegistration(req.body?.credential, { challenge: ch.challenge, ...wa.relyingParty() }); } catch (e) { throw bad(e.message); }
+  if (get('SELECT 1 FROM webauthn_credentials WHERE credential_id = ?', r.credentialId)) throw new HttpError(409, 'Esta chave já está cadastrada.');
+  run('INSERT INTO webauthn_credentials (user_id, credential_id, public_key_jwk, alg, sign_count, name, created_at) VALUES (?,?,?,?,?,?,?)',
+    req.user.id, r.credentialId, JSON.stringify(r.jwk), r.alg, r.signCount, name, Date.now());
+  audit(req.user.id, 'webauthn.added', { name }, req.ip);
+  res.status(201).json({ ok: true });
+});
+router.delete('/webauthn/:id', requireUser, mfaLimiter, (req, res) => {
+  confirmSensitive(req);
+  const r = run('DELETE FROM webauthn_credentials WHERE id = ? AND user_id = ?', Number(req.params.id) || 0, req.user.id);
+  if (!r.changes) throw new HttpError(404, 'Chave não encontrada.');
+  audit(req.user.id, 'webauthn.removed', null, req.ip);
+  res.json({ ok: true });
+});
+
 module.exports = router;
 module.exports.confirmSensitive = confirmSensitive;
 module.exports.resetUserMfa = (userId) => tx(() => {
+  run('DELETE FROM webauthn_credentials WHERE user_id = ?', userId);
   run('UPDATE users SET totp_enabled = 0, totp_secret_enc = NULL, totp_last_step = NULL WHERE id = ? /* tenant-ok: login/2FA: conta do próprio usuário (e-mail é único na plataforma) */', userId);
   run('DELETE FROM mfa_recovery_codes WHERE user_id = ?', userId);
   destroyUserSessions(userId);

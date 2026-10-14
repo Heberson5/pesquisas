@@ -52,7 +52,7 @@ function destroyUserSessions(userId) { run('DELETE FROM sessions WHERE user_id =
 const SAFE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
 const MFA_SETUP_ALLOWED = new Set(['GET /me', 'POST /mfa/setup', 'POST /mfa/enable', 'POST /logout']);
 // Empresa suspensa (falta de pagamento, fim do teste ou suspensão pela plataforma): o painel fica limitado à tela de pagamento.
-const LOCK_ALLOWED = new Set(['GET /me', 'POST /logout', 'POST /me/password', 'GET /billing', 'POST /billing/subscribe',
+const LOCK_ALLOWED = new Set(['GET /me', 'POST /logout', 'GET /me/sessions', 'GET /manual', 'POST /manual/seen', 'POST /me/sessions/revoke-others', 'POST /me/password', 'GET /billing', 'POST /billing/subscribe',
   'GET /mfa', 'POST /mfa/setup', 'POST /mfa/enable', 'POST /mfa/disable', 'POST /mfa/recovery-codes']);
 
 // Unidades que um gestor pode ver: só as vinculadas a ele E da empresa em uso.

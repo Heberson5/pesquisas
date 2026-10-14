@@ -41,11 +41,12 @@ function keysFor(companyId) {
 const encryptFor = (companyId, plain) => vault.encryptK(keysFor(companyId), plain);
 const decryptFor = (companyId, blob) => (blob ? vault.decryptK(keysFor(companyId), blob) : null);
 const lookupFor = (companyId, value) => vault.lookupK(keysFor(companyId), value);
+const lookupAllFor = (companyId, value) => vault.lookupAllK(keysFor(companyId), value);
 const signFor = (companyId, value) => vault.signK(keysFor(companyId), value);
 // Depois da exclusão definitiva: tira a chave da memória (o sal já foi apagado do banco = dados irrecuperáveis).
 const forgetKeys = (companyId) => vault.forgetCompanyKeys(companyId);
 
 module.exports = {
   STATUS_LABEL, BLOCKED, getCompany, listCompanies, companyTz, createCompany, uniqueSlug,
-  keysFor, encryptFor, decryptFor, lookupFor, signFor, forgetKeys,
+  keysFor, encryptFor, decryptFor, lookupFor, lookupAllFor, signFor, forgetKeys,
 };
