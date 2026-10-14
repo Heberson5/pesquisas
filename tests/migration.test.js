@@ -52,7 +52,7 @@ test('banco de empresa única migra para a empresa nº 1 sem perder dados', () =
       links: all('SELECT * FROM user_branches'),
     }));
   `));
-  assert.equal(out.version, 1);
+  assert.equal(out.version, require('../src/migrations').MIGRATIONS.at(-1).version);
   assert.equal(out.company.id, 1); assert.equal(out.company.name, 'Rede Antiga'); assert.equal(out.company.slug, 'rede-antiga'); assert.equal(out.company.status, 'active');
   assert.deepEqual(out.users, [{ email: 'adm@antiga.local', role: 'admin', company_id: 1 }, { email: 'ges@antiga.local', role: 'gestor', company_id: 1 }]);
   assert.equal(out.branch.company_id, 1); assert.equal(out.survey.company_id, 1);

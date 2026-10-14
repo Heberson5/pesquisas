@@ -151,7 +151,7 @@ router.post('/password/reset', forgotLimiter, (req, res) => {
     run('UPDATE users SET password_hash = ?, failed_logins = 0, locked_until = NULL WHERE id = ? /* tenant-ok: login/2FA: conta do próprio usuário (e-mail é único na plataforma) */', hashPassword(req.body.password), r.user_id);
   });
   destroyUserSessions(r.user_id);
-  audit(r.user_id, 'password.reset_done', null, req.ip);
+  audit(r.user_id, r.kind === 'invite' ? 'invite.accepted' : 'password.reset_done', null, req.ip);
   res.json({ ok: true });
 });
 
@@ -227,7 +227,26 @@ router.post('/mfa/disable', requireUser, mfaLimiter, (req, res) => {
   res.json({ ok: true });
 });
 
+// Confirmação de ação sensível (cancelar/excluir empresa, etc.): senha atual e, se o 2FA estiver ativo, o código do aplicativo.
+// Erros contam para o bloqueio da conta, como no login.
+function confirmSensitive(req) {
+  const u = get('SELECT * FROM users WHERE id = ? /* tenant-ok: conta do próprio usuário */', req.user.id);
+  if (u.locked_until && u.locked_until > Date.now()) throw new HttpError(423, 'Conta temporariamente bloqueada por excesso de tentativas. Tente em 15 minutos.');
+  if (!verifyPassword(String(req.body?.password || '').slice(0, 200), u.password_hash)) {
+    registerFailure(u, req, 'confirm.bad_password');
+    throw new HttpError(403, 'Senha incorreta. Confirme com a sua senha para continuar.');
+  }
+  if (u.totp_enabled) {
+    const step = totp.verify(decrypt(u.totp_secret_enc) || '', String(req.body?.code || '').trim(), u.totp_last_step);
+    if (step === null) { registerFailure(u, req, 'confirm.bad_code'); throw new HttpError(403, 'Código do aplicativo autenticador inválido.'); }
+    run('UPDATE users SET totp_last_step = ? WHERE id = ? /* tenant-ok: conta do próprio usuário */', step, u.id);
+  }
+  run('UPDATE users SET failed_logins = 0 WHERE id = ? /* tenant-ok: conta do próprio usuário */', u.id);
+  return u;
+}
+
 module.exports = router;
+module.exports.confirmSensitive = confirmSensitive;
 module.exports.resetUserMfa = (userId) => tx(() => {
   run('UPDATE users SET totp_enabled = 0, totp_secret_enc = NULL, totp_last_step = NULL WHERE id = ? /* tenant-ok: login/2FA: conta do próprio usuário (e-mail é único na plataforma) */', userId);
   run('DELETE FROM mfa_recovery_codes WHERE user_id = ?', userId);

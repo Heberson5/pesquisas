@@ -290,3 +290,15 @@ label.f > .small { font-weight: 400; }
 .acting-banner { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 10px 24px; background: color-mix(in srgb, var(--mid) 16%, var(--surface)); border-bottom: 1px solid var(--line); font-size: 14px; }
 .acting-banner span { flex: 1 1 260px; }
 .perm-box { grid-column: 1 / -1; display: grid; gap: 6px; padding: 12px; border: 1px dashed var(--line); border-radius: 10px; }
+.grid.c4 { grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); margin-bottom: 20px; }
+.kpi-mini { padding: 14px 18px; }
+.kpi-num { font-size: 26px; font-weight: 800; margin-top: 2px; }
+.kpi-num.ok { color: var(--good); } .kpi-num.warn { color: var(--mid); } .kpi-num.off { color: var(--bad); }
+.row.wrap { flex-wrap: wrap; }
+.warn-card { border-color: color-mix(in srgb, var(--mid) 45%, var(--line)); background: color-mix(in srgb, var(--mid) 8%, var(--surface)); }
+.warn-text { color: var(--mid); }
+.meter { height: 10px; border-radius: 99px; background: var(--surface-2); overflow: hidden; margin: 6px 0 10px; }
+.meter-fill { display: block; height: 100%; border-radius: 99px; background: var(--good); }
+.meter-fill.warn { background: var(--mid); } .meter-fill.crit { background: var(--bad); }
+.signup-terms { display: flex; gap: 8px; align-items: flex-start; font-size: 14px; }
+.hp { position: absolute; left: -10000px; width: 1px; height: 1px; overflow: hidden; }

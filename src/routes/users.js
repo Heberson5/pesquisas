@@ -11,6 +11,8 @@ const { P, parseGrants, grantsInput } = require('../permissions');
 const { HttpError, bad, str, id, email } = require('../validate');
 const { resetUserMfa } = require('./auth');
 const { scope } = require('../scope');
+const { sendInvite } = require('../invites');
+const { randomToken } = require('../security');
 
 const router = express.Router();
 router.use(requireCompany);
@@ -54,9 +56,10 @@ function userInput(req, isNew) {
     // Só o Administrador libera permissões extras (e só para gestores).
     grants: all_ && body.role !== 'admin' ? grantsInput(body.permissions) : null,
     password: body.password || null,
+    invite: isNew && body.invite === true && !body.password, // convite: o próprio usuário cria a senha pelo link do e-mail
   };
   if (!all_ && body.role === 'admin') throw new HttpError(403, 'Você só pode cadastrar gestores.');
-  if (isNew || u.password) {
+  if ((isNew && !u.invite) || u.password) {
     const err = passwordPolicyError(u.password);
     if (err) throw bad(err);
   }
@@ -79,11 +82,12 @@ router.post('/users', (req, res) => {
   if (get('SELECT 1 FROM users WHERE email = ? /* tenant-ok: e-mail é único na plataforma */', u.email)) throw new HttpError(409, 'Este e-mail já está em uso.');
   const newId = tx(() => {
     const r = run('INSERT INTO users (company_id, name, email, password_hash, role, active, permissions, created_at) VALUES (?,?,?,?,?,?,?,?)',
-      req.user.companyId, u.name, u.email, hashPassword(u.password), u.role, u.active, u.grants && u.grants.length ? JSON.stringify(u.grants) : null, Date.now());
+      req.user.companyId, u.name, u.email, hashPassword(u.password || randomToken(24) + 'a1'), u.role, u.active, u.grants && u.grants.length ? JSON.stringify(u.grants) : null, Date.now());
     setUserBranches(Number(r.lastInsertRowid), u.role === 'admin' ? [] : u.branches);
     return Number(r.lastInsertRowid);
   });
-  auditReq(req, 'user.create', { id: newId, email: u.email, role: u.role, branches: u.branches, permissions: u.grants || [] });
+  if (u.invite) sendInvite(newId, { invitedBy: req.user.name });
+  auditReq(req, 'user.create', { id: newId, email: u.email, role: u.role, branches: u.branches, permissions: u.grants || [], invited: u.invite });
   res.status(201).json({ id: newId });
 });
 

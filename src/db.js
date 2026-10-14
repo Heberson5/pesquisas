@@ -320,4 +320,4 @@ function auditReq(req, action, detail = null, branchId = null) {
   audit(req.user?.id ?? null, action, detail, req.ip, { companyId: req.user?.companyId ?? null, branchId, asMaster: req.user?.role === 'master' });
 }
 
-module.exports = { db, tx, get, all, run, audit, auditReq, MEDIA_DIR };
+module.exports = { db, tx, get, all, run, audit, auditReq, MEDIA_DIR, DB_FILE };
