@@ -22,15 +22,18 @@ function canEditSurvey(user, surveyId) {
   const used = all('SELECT id FROM branches WHERE company_id = ? AND survey_id = ?', user.companyId, surveyId).map((b) => b.id);
   const sched = all('SELECT branch_id FROM schedules WHERE company_id = ? AND survey_id = ? AND ends_at > ?', user.companyId, surveyId, Date.now());
   if (sched.some((x) => x.branch_id === null)) return false;
-  return [...used, ...sched.map((x) => x.branch_id)].every((b) => s.includes(b));
+  // Respostas já coletadas em outras unidades também contam: mudar a pesquisa mudaria o histórico (e o NPS) delas.
+  const answered = all('SELECT DISTINCT branch_id FROM responses WHERE company_id = ? AND survey_id = ?', user.companyId, surveyId).map((x) => x.branch_id);
+  return [...used, ...sched.map((x) => x.branch_id), ...answered].every((b) => s.includes(b));
 }
 
 router.get('/surveys', (req, res) => {
+  const sc = scope(req.user); // gestor: contagem só das unidades dele
   const rows = all(`SELECT s.id, s.title, s.active, s.updated_at,
       (SELECT COUNT(*) FROM questions q WHERE q.survey_id = s.id) AS questions,
       (SELECT COUNT(*) FROM questions q WHERE q.survey_id = s.id AND q.is_nps = 1) AS nps_questions,
-      (SELECT COUNT(*) FROM responses r WHERE r.survey_id = s.id AND r.company_id = s.company_id) AS responses
-    FROM surveys s WHERE s.company_id = ? ORDER BY s.active DESC, s.updated_at DESC`, req.user.companyId);
+      (SELECT COUNT(*) FROM responses r WHERE r.survey_id = s.id AND r.company_id = s.company_id ${sc ? (sc.length ? `AND r.branch_id IN (${sc.map(() => '?').join(',')})` : 'AND 0') : ''}) AS responses
+    FROM surveys s WHERE s.company_id = ? ORDER BY s.active DESC, s.updated_at DESC`, ...(sc || []), req.user.companyId);
   res.json(rows.map((s) => ({ ...s, editable: req.user.can(P.SURVEYS) && canEditSurvey(req.user, s.id) })));
 });
 

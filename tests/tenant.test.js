@@ -206,3 +206,40 @@ test('varredura do SQL: toda consulta a tabela de empresa filtra por company_id 
   assert.match(fs.readFileSync(path.join(__dirname, '..', 'src', 'stats.js'), 'utf8'), /r\.company_id = \?/);
   assert.match(fs.readFileSync(path.join(__dirname, '..', 'src', 'routes', 'cases.js'), 'utf8'), /\['c\.company_id = \?'\]/);
 });
+
+test('gestor que cadastra gestores não assume a conta de outro gestor nem herda permissões', async () => {
+  const b1 = (await A.admin.req('POST', '/api/admin/branches', { body: { code: 'TK1', name: 'Takeover 1' } })).json.id;
+  const b2 = (await A.admin.req('POST', '/api/admin/branches', { body: { code: 'TK2', name: 'Takeover 2' } })).json.id;
+  const g1 = makeUser('g1@tk.local', 'gestor', 'SenhaForte123', [b1, b2], { companyId: A.id, permissions: ['users.gestores'] });
+  const g2 = makeUser('g2@tk.local', 'gestor', 'SenhaForte123', [b1], { companyId: A.id, permissions: ['privacy.manage'] });
+  const g3 = makeUser('g3@tk.local', 'gestor', 'SenhaForte123', [b1], { companyId: A.id });
+  void g1;
+  const c = new Client(); await c.login('g1@tk.local', 'SenhaForte123');
+  const list = (await c.req('GET', '/api/admin/users')).json.map((u) => u.email);
+  assert.ok(list.includes('g3@tk.local')); assert.ok(!list.includes('g2@tk.local'), 'não vê quem tem permissão que ele não tem');
+  assert.equal((await c.req('PUT', `/api/admin/users/${g2}`, { body: { name: 'G2', email: 'g2@tk.local', branches: [b1], password: 'NovaSenha12345' } })).status, 404);
+  assert.equal((await c.req('PUT', `/api/admin/users/${g3}`, { body: { name: 'G3', email: 'g3@tk.local', branches: [b1], password: 'NovaSenha12345' } })).status, 403, 'não troca a senha de outro');
+  assert.equal((await c.req('PUT', `/api/admin/users/${g3}`, { body: { name: 'G3', email: 'meu@atacante.com', branches: [b1] } })).status, 403, 'não troca o e-mail de outro');
+  assert.equal((await c.req('PUT', `/api/admin/users/${g3}`, { body: { name: 'G3', email: 'g3@tk.local', branches: [b1], resetMfa: true } })).status, 403);
+  assert.equal((await c.req('PUT', `/api/admin/users/${g3}`, { body: { name: 'Gestor Três', email: 'g3@tk.local', branches: [b1, b2] } })).status, 200, 'nome e unidades pode');
+  assert.equal((await new Client().login('g3@tk.local', 'SenhaForte123')).status, 200, 'senha intacta');
+});
+
+test('gestor não altera pesquisa que já tem respostas de unidade fora do escopo dele', async () => {
+  const outra = (await A.admin.req('POST', '/api/admin/branches', { body: { code: 'SV2', name: 'Outra unidade' } })).json.id;
+  const sv = (await A.admin.req('POST', '/api/admin/surveys', { body: { title: 'Histórico', welcome_title: 'Olá', thanks_title: 'Ok', thanks_seconds: 5, idle_seconds: 30,
+    questions: [{ text: 'Nota?', type: 'nps', is_nps: true }] } })).json.id;
+  await A.admin.req('PUT', `/api/admin/branches/${outra}/survey`, { body: { surveyId: sv } });
+  const d = await A.admin.req('POST', '/api/admin/devices', { body: { branchId: outra, name: 'Tablet SV2' } });
+  const pr = await new Client().req('POST', '/api/kiosk/pair', { body: { code: d.json.code } });
+  assert.equal(pr.status, 200, JSON.stringify([d.status, d.text, pr.text]));
+  const tok = pr.json.token;
+  const q = (await A.admin.req('GET', `/api/admin/surveys/${sv}`)).json.questions[0].id;
+  assert.equal((await kiosk(tok, { uuid: crypto.randomUUID(), surveyId: sv, answers: [{ questionId: q, value: 3 }] })).status, 201);
+  await A.admin.req('PUT', `/api/admin/branches/${outra}/survey`, { body: { surveyId: null } });
+  const g = new Client(); await g.login('gestor@alfa.local', 'SenhaForte123');
+  const body = { title: 'Mudada', welcome_title: 'x', thanks_title: 'x', thanks_seconds: 5, idle_seconds: 30, questions: [{ text: 'Outra?', type: 'nps' }] };
+  assert.equal((await g.req('PUT', `/api/admin/surveys/${sv}`, { body })).status, 403);
+  const listed = (await g.req('GET', '/api/admin/surveys')).json.find((s) => s.id === sv);
+  assert.equal(listed.editable, false); assert.equal(listed.responses, 0, 'não vê o volume de outras unidades');
+});
