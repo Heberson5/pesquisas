@@ -26,11 +26,13 @@ router.use('/users', requireUsersPerm);
 
 const branchesOf = (userId) => all('SELECT branch_id FROM user_branches WHERE user_id = ?', userId).map((r) => r.branch_id);
 
-// Gestor com permissão limitada só enxerga gestores cujas unidades estão TODAS dentro das dele.
+// Gestor com permissão limitada só enxerga gestores cujas unidades estão TODAS dentro das dele e que não
+// tenham permissão que ele mesmo não tem (senão poderia "herdar" acessos que o administrador não lhe deu).
 function visibleTo(user, target, targetBranches) {
   if (canManageAll(user)) return true;
   const s = scope(user) || [];
-  return target.role === 'gestor' && targetBranches.length > 0 && targetBranches.every((b) => s.includes(b));
+  return target.role === 'gestor' && targetBranches.length > 0 && targetBranches.every((b) => s.includes(b))
+    && (Array.isArray(target.permissions) ? target.permissions : parseGrants(target.permissions)).every((p) => user.can(p));
 }
 
 router.get('/users', (req, res) => {
@@ -95,6 +97,10 @@ router.put('/users/:id', (req, res) => {
   if (!existing || !visibleTo(req.user, existing, branchesOf(uid))) throw new HttpError(404, 'Usuário não encontrado.');
   const u = userInput(req, false);
   if (uid === req.user.id && (u.role !== existing.role || !u.active)) throw bad('Você não pode alterar o seu próprio perfil de acesso.');
+  // Gestor que cadastra gestores não troca senha, e-mail nem 2FA de outra pessoa (isso permitiria entrar na conta dela).
+  if (!canManageAll(req.user) && uid !== req.user.id && (u.password || u.email !== existing.email || req.body?.resetMfa === true)) {
+    throw new HttpError(403, 'Senha, e-mail e 2FA de outro usuário só o administrador altera.');
+  }
   if (get('SELECT 1 FROM users WHERE email = ? AND id <> ? /* tenant-ok: e-mail é único na plataforma */', u.email, uid)) throw new HttpError(409, 'Este e-mail já está em uso.');
   // Gestor com permissão limitada não mexe nas permissões; o Administrador define (gestor) ou limpa (admin).
   const grants = canManageAll(req.user) ? (u.role === 'admin' ? [] : u.grants) : parseGrants(existing.permissions);
