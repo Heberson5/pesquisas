@@ -42,7 +42,7 @@ test('contato fica criptografado no banco (nem nome, nem telefone, nem e-mail em
   const r = get('SELECT * FROM responses WHERE contact_consent_at IS NOT NULL ORDER BY id DESC LIMIT 1');
   const dump = JSON.stringify(r);
   assert.doesNotMatch(dump, /Maria|98888|maria@cliente/);
-  assert.match(r.contact_phone_enc, /^v1\./);
+  assert.match(r.contact_phone_enc, /^c1\.1\./, 'criptografado com a chave da empresa');
 });
 
 test('detrator abre caso e enfileira alerta para a filial; promotor não', async () => {

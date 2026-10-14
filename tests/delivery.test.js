@@ -3,7 +3,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const dnsp = require('node:dns').promises;
-const { start, stop, Client, makeUser, run, get } = require('./helpers');
+const { start, stop, Client, makeUser, run, get, COMPANY } = require('./helpers');
 const { all } = require('../src/db');
 const delivery = require('../src/delivery');
 
@@ -56,24 +56,24 @@ test('SMTP: recusa servidor interno, IP, porta estranha e injeção de cabeçalh
   assert.equal((await put(admin, smtpBody({ password: '' }))).status, 400, 'usuário sem senha');
   assert.equal((await put(admin, { smtp: 'texto' })).status, 400);
   assert.equal((await put(admin, { smtp: [1] })).status, 400);
-  assert.equal(delivery.smtp(), null, 'nada foi gravado');
+  assert.equal(delivery.smtp(COMPANY), null, 'nada foi gravado');
 });
 
 test('SMTP salvo: senha criptografada no banco e nunca devolvida; senha em branco mantém a atual', async () => {
   const r = await put(admin, smtpBody());
   assert.equal(r.status, 200, r.text);
   assert.equal(r.json.smtp.passwordSet, true);
-  assert.equal(r.json.smtp.source, 'painel');
+  assert.equal(r.json.smtp.source, 'empresa');
   assert.ok(!r.text.includes(SECRET_PASS));
-  const raw = get("SELECT value FROM settings WHERE key = 'delivery'").value;
+  const raw = get("SELECT value FROM company_settings WHERE key = 'delivery'").value;
   assert.ok(!raw.includes(SECRET_PASS), 'senha não pode estar em texto puro no banco');
-  assert.equal(delivery.smtp().auth.pass, SECRET_PASS, 'o sistema consegue descriptografar para enviar');
+  assert.equal(delivery.smtp(COMPANY).auth.pass, SECRET_PASS, 'o sistema consegue descriptografar para enviar');
   for (const url of ['/api/admin/settings/delivery', '/api/admin/settings', '/api/admin/me', '/api/admin/settings/notifications']) {
     assert.ok(!(await admin.req('GET', url)).text.includes(SECRET_PASS), url);
   }
   assert.equal((await put(admin, smtpBody({ password: '', host: 'smtp.exemplo.com.br', from: 'Outro <outro@exemplo.com.br>' }))).status, 200);
-  assert.equal(delivery.smtp().auth.pass, SECRET_PASS, 'senha mantida');
-  assert.equal(delivery.smtp().from, 'Outro <outro@exemplo.com.br>');
+  assert.equal(delivery.smtp(COMPANY).auth.pass, SECRET_PASS, 'senha mantida');
+  assert.equal(delivery.smtp(COMPANY).from, 'Outro <outro@exemplo.com.br>');
 });
 
 test('e-mail de teste usa a configuração do painel e falha com mensagem clara se o servidor não responde', async () => {
@@ -95,11 +95,11 @@ test('WhatsApp: valida identificador e token; token criptografado e nunca devolv
   assert.equal(r.status, 200, r.text);
   assert.equal(r.json.whatsapp.tokenSet, true);
   assert.ok(!r.text.includes(SECRET_TOKEN));
-  assert.ok(!get("SELECT value FROM settings WHERE key = 'delivery'").value.includes(SECRET_TOKEN));
-  assert.equal(delivery.whatsapp().token, SECRET_TOKEN);
+  assert.ok(!get("SELECT value FROM company_settings WHERE key = 'delivery'").value.includes(SECRET_TOKEN));
+  assert.equal(delivery.whatsapp(COMPANY).token, SECRET_TOKEN);
   assert.ok(!(await admin.req('GET', '/api/admin/settings')).text.includes(SECRET_TOKEN));
   assert.equal((await put(admin, { whatsapp: { phoneId: '109876543210999', token: '' } })).status, 200, 'trocar só o número mantém o token');
-  assert.equal(delivery.whatsapp().token, SECRET_TOKEN);
+  assert.equal(delivery.whatsapp(COMPANY).token, SECRET_TOKEN);
 });
 
 test('WhatsApp pessoal do usuário: normaliza, valida e entra nos alertas de detrator', async () => {
@@ -141,7 +141,7 @@ test('auditoria: não registra segredos, traz o nome de quem agiu e limita o tam
 
 test('remover configuração do painel volta ao padrão (.env)', async () => {
   assert.equal((await put(admin, { smtp: { clear: true }, whatsapp: { clear: true } })).status, 200);
-  assert.equal(delivery.smtp(), null);
-  assert.equal(delivery.whatsapp(), null);
+  assert.equal(delivery.smtp(COMPANY), null);
+  assert.equal(delivery.whatsapp(COMPANY), null);
   void run;
 });

@@ -144,8 +144,10 @@ test('gestor não altera nada de outra filial nem acessa áreas de admin', async
   assert.equal((await gestorA.req('GET', '/api/admin/users')).status, 403);
   assert.equal((await gestorA.req('GET', '/api/admin/audit')).status, 403);
   assert.equal((await gestorA.req('POST', '/api/admin/users', { body: { name: 'Eu', email: 'eu@t.local', role: 'admin', password: 'SenhaForte123' } })).status, 403);
-  assert.equal((await gestorA.req('POST', '/api/admin/surveys', { body: {} })).status, 403);
-  assert.equal((await gestorA.req('POST', '/api/admin/media', { raw: Buffer.from('x') })).status, 403);
+  // Gestor pode criar pesquisas (decisão do projeto multiempresa): aqui só falha a validação.
+  assert.equal((await gestorA.req('POST', '/api/admin/surveys', { body: {} })).status, 400);
+  assert.equal((await gestorA.req('PUT', '/api/admin/settings', { body: { companyName: 'Intruso' } })).status, 403);
+  assert.equal((await gestorA.req('DELETE', '/api/admin/responses/1')).status, 403);
   assert.equal(get('SELECT active FROM devices WHERE id = ?', deviceB.id).active, 1);
 });
 

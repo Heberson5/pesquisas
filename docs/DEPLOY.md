@@ -41,9 +41,11 @@ senão os limites de tentativas por IP podem ser burlados.
 
 Confira: `docker compose ps` (app **healthy**) e abra https://pesquisa.sauberlich.com.br/admin/
 
-## 5. Primeiro administrador
+## 5. Primeiro acesso (Master, empresa e administrador)
 ```bash
-docker compose exec app node scripts/create-admin.js voce@sauberlich.com.br "Seu Nome"
+docker compose exec app node scripts/create-master.js voce@sauberlich.com.br "Seu Nome"
+docker compose exec app node scripts/create-company.js "Nome da Empresa"
+docker compose exec app node scripts/create-admin.js admin@empresa.com.br "Nome" --empresa nome-da-empresa
 ```
 No primeiro login o sistema exige ativar o 2FA (Google Authenticator/Microsoft Authenticator). Guarde os códigos de recuperação.
 

@@ -263,7 +263,7 @@ for (const [table, column, ddl] of [
   ['questions', 'i18n', 'i18n TEXT'],
 ]) addColumnIfMissing(table, column, ddl);
 // Respostas antigas de tablet: copia o nome atual do tablet (depois disso, renomear não muda o histórico).
-db.exec("UPDATE responses SET device_label = (SELECT name FROM devices WHERE devices.id = responses.device_id) WHERE device_label IS NULL AND device_id IS NOT NULL");
+db.exec("UPDATE responses SET device_label = (SELECT name FROM devices WHERE devices.id = responses.device_id) WHERE device_label IS NULL AND device_id IS NOT NULL /* tenant-ok: manutenção do esquema (todas as empresas) */");
 db.exec(`CREATE INDEX IF NOT EXISTS idx_resp_phone ON responses(contact_phone_lookup);
 CREATE INDEX IF NOT EXISTS idx_resp_email ON responses(contact_email_lookup);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_branch_public ON branches(public_token_hash);`);
@@ -288,6 +288,10 @@ if (!qSql.includes("'default'")) {
   } catch (e) { db.exec('ROLLBACK'); throw e; } finally { db.exec('PRAGMA foreign_keys = ON'); }
 }
 
+// Migrações numeradas (multiempresa em diante). A variável abaixo existe só para os testes de migração
+// criarem um banco no formato antigo; em produção as migrações sempre rodam.
+if (process.env.PESQUISA_SKIP_MIGRATIONS !== '1') require('./migrations').runMigrations(db);
+
 function tx(fn) {
   db.exec('BEGIN IMMEDIATE');
   try {
@@ -304,9 +308,16 @@ const get = (sql, ...p) => db.prepare(sql).get(...p);
 const all = (sql, ...p) => db.prepare(sql).all(...p);
 const run = (sql, ...p) => db.prepare(sql).run(...p);
 
-function audit(userId, action, detail, ip) {
-  run('INSERT INTO audit_log (at, user_id, action, detail, ip) VALUES (?,?,?,?,?)',
-    Date.now(), userId ?? null, action, detail ? JSON.stringify(detail).slice(0, 2000) : null, ip ?? null);
+// Auditoria. `where` diz de qual empresa (e unidade) é a ação e se foi o Master agindo dentro da empresa.
+function audit(userId, action, detail, ip, where = {}) {
+  run('INSERT INTO audit_log (at, user_id, action, detail, ip, company_id, branch_id, as_master) VALUES (?,?,?,?,?,?,?,?)',
+    Date.now(), userId ?? null, action, detail ? JSON.stringify(detail).slice(0, 2000) : null, ip ?? null,
+    where.companyId ?? null, where.branchId ?? null, where.asMaster ? 1 : 0);
 }
 
-module.exports = { db, tx, get, all, run, audit, MEDIA_DIR };
+// Auditoria a partir da requisição do painel (usuário, empresa em uso e IP já conhecidos).
+function auditReq(req, action, detail = null, branchId = null) {
+  audit(req.user?.id ?? null, action, detail, req.ip, { companyId: req.user?.companyId ?? null, branchId, asMaster: req.user?.role === 'master' });
+}
+
+module.exports = { db, tx, get, all, run, audit, auditReq, MEDIA_DIR };

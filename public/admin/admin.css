@@ -285,3 +285,8 @@ details.tr .form-grid { margin-top: 10px; }
 tr.tone-warn td:first-child { box-shadow: inset 3px 0 0 var(--mid); }
 tr.tone-bad td:first-child { box-shadow: inset 3px 0 0 var(--bad); }
 label.f > .small { font-weight: 400; }
+
+/* Master dentro de uma empresa: faixa sempre visível. */
+.acting-banner { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 10px 24px; background: color-mix(in srgb, var(--mid) 16%, var(--surface)); border-bottom: 1px solid var(--line); font-size: 14px; }
+.acting-banner span { flex: 1 1 260px; }
+.perm-box { grid-column: 1 / -1; display: grid; gap: 6px; padding: 12px; border: 1px dashed var(--line); border-radius: 10px; }

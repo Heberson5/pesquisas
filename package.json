@@ -2,7 +2,7 @@
   "name": "pesquisa-satisfacao",
   "version": "0.1.0",
   "private": true,
-  "description": "Sistema de coleta de pesquisa de satisfação (NPS) multi-filial com modo quiosque para tablets",
+  "description": "Plataforma de pesquisa de satisfação (NPS) para várias empresas, com modo quiosque para tablets",
   "main": "server.js",
   "type": "commonjs",
   "engines": {
@@ -11,6 +11,8 @@
   "scripts": {
     "start": "node --disable-warning=ExperimentalWarning server.js",
     "dev": "node --disable-warning=ExperimentalWarning --watch server.js",
+    "create-master": "node --disable-warning=ExperimentalWarning scripts/create-master.js",
+    "create-company": "node --disable-warning=ExperimentalWarning scripts/create-company.js",
     "create-admin": "node --disable-warning=ExperimentalWarning scripts/create-admin.js",
     "seed:demo": "node --disable-warning=ExperimentalWarning scripts/seed-demo.js",
     "test": "node --disable-warning=ExperimentalWarning --test tests/*.test.js"

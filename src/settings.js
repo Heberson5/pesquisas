@@ -1,5 +1,6 @@
 'use strict';
-// Configurações gerais da empresa: identidade visual, ícones do menu e das respostas.
+// Configurações de cada empresa (identidade visual, ícones, alertas, LGPD, tela do tablet) e da plataforma.
+// Ordem de leitura: padrão do sistema < padrão da plataforma (definido pelo Master) < configuração da empresa.
 const { all, run, get } = require('./db');
 const { bad, str, int } = require('./validate');
 const { isEmail, validateWebhookUrl } = require('./notify');
@@ -50,35 +51,65 @@ function emailList(v, max = 20) {
   return out;
 }
 
-function getSettings() {
+// ---------------------------------------------------------------- plataforma (Master)
+function getPlatform(key, fallback = null) {
+  const row = get('SELECT value FROM platform_settings WHERE key = ?', key);
+  if (!row) return fallback;
+  try { return JSON.parse(row.value); } catch { return fallback; }
+}
+const setPlatform = (key, value) => run('INSERT INTO platform_settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value', key, JSON.stringify(value));
+
+// Marca da plataforma: tela de login e telas do Master fora de uma empresa.
+const PLATFORM_BRANDING = { companyName: 'Pesquisa de Satisfação', primaryColor: '#0f3d5e', accentColor: '#ffd166' };
+function platformBranding() {
+  const b = { ...PLATFORM_BRANDING, ...(getPlatform('branding', {}) || {}) };
+  return { companyName: b.companyName, primaryColor: b.primaryColor, accentColor: b.accentColor, logoUrl: null, privacyText: DEFAULTS.privacyText, platform: true };
+}
+
+// ---------------------------------------------------------------- empresa
+function merge(out, key, value) {
+  if (!Object.hasOwn(DEFAULTS, key)) return;
+  out[key] = OBJECT_KEYS.includes(key) ? { ...DEFAULTS[key], ...value } : value;
+}
+
+function getSettings(companyId) {
+  if (!companyId) throw new Error('getSettings exige a empresa.');
   const out = structuredClone(DEFAULTS);
-  for (const { key, value } of all('SELECT key, value FROM settings')) {
-    if (!Object.hasOwn(DEFAULTS, key)) continue;
-    try { out[key] = OBJECT_KEYS.includes(key) ? { ...DEFAULTS[key], ...JSON.parse(value) } : JSON.parse(value); } catch { /* ignora valor corrompido */ }
+  const defaults = getPlatform('companyDefaults', {}) || {};
+  for (const [k, v] of Object.entries(defaults)) merge(out, k, v);
+  for (const { key, value } of all('SELECT key, value FROM company_settings WHERE company_id = ?', companyId)) {
+    try { merge(out, key, JSON.parse(value)); } catch { /* ignora valor corrompido */ }
   }
   return out;
 }
 
-function mediaRef(v, field, { imagesOnly = true } = {}) {
+// Valores internos por empresa (ex.: quando o relatório semanal foi enviado). Não aparecem na tela.
+function getState(companyId, key) {
+  const row = get('SELECT value FROM company_settings WHERE company_id = ? AND key = ?', companyId, 'state.' + key);
+  try { return row ? JSON.parse(row.value) : null; } catch { return null; }
+}
+const setState = (companyId, key, value) => run('INSERT INTO company_settings (company_id, key, value) VALUES (?,?,?) ON CONFLICT(company_id, key) DO UPDATE SET value = excluded.value', companyId, 'state.' + key, JSON.stringify(value));
+
+function mediaRef(companyId, v, field, { imagesOnly = true } = {}) {
   if (v === null || v === undefined || v === '') return null;
   if (typeof v !== 'string' || !MEDIA_ID.test(v)) throw bad(`Arquivo de ${field} inválido.`);
-  const m = get('SELECT mime FROM media WHERE id = ?', v);
+  const m = get('SELECT mime FROM media WHERE id = ? AND company_id = ?', v, companyId);
   if (!m) throw bad(`Arquivo de ${field} não encontrado.`);
   if (imagesOnly && !m.mime.startsWith('image/')) throw bad(`O ${field} precisa ser uma imagem.`);
   return v;
 }
 
 // Valida e grava. Só chaves conhecidas, só ícones da biblioteca, só cores #rrggbb.
-function saveSettings(input) {
+function saveSettings(companyId, input) {
   if (!input || typeof input !== 'object') throw bad('Configurações inválidas.');
-  const cur = getSettings();
+  const cur = getSettings(companyId);
   const next = {
     companyName: str(input.companyName ?? cur.companyName, { field: 'nome da empresa', min: 2, max: 60 }),
     primaryColor: text(input.primaryColor, cur.primaryColor, 'cor principal'),
     accentColor: text(input.accentColor, cur.accentColor, 'cor de destaque'),
-    logoMediaId: mediaRef(input.logoMediaId !== undefined ? input.logoMediaId : cur.logoMediaId, 'logo'),
-    faviconMediaId: mediaRef(input.faviconMediaId !== undefined ? input.faviconMediaId : cur.faviconMediaId, 'ícone do navegador'),
-    appIconMediaId: mediaRef(input.appIconMediaId !== undefined ? input.appIconMediaId : cur.appIconMediaId, 'ícone do aplicativo'),
+    logoMediaId: mediaRef(companyId, input.logoMediaId !== undefined ? input.logoMediaId : cur.logoMediaId, 'logo'),
+    faviconMediaId: mediaRef(companyId, input.faviconMediaId !== undefined ? input.faviconMediaId : cur.faviconMediaId, 'ícone do navegador'),
+    appIconMediaId: mediaRef(companyId, input.appIconMediaId !== undefined ? input.appIconMediaId : cur.appIconMediaId, 'ícone do aplicativo'),
     menuIcons: { ...cur.menuIcons },
     defaultDisplay: text(input.defaultDisplay, cur.defaultDisplay, 'estilo padrão'),
     ratingIcon: text(input.ratingIcon, cur.ratingIcon, 'ícone de avaliação'),
@@ -156,14 +187,14 @@ function saveSettings(input) {
     if (sc.dimLevel !== undefined) next.screen.dimLevel = int(sc.dimLevel, { field: 'nível de escurecimento', min: 20, max: 90 });
   }
   for (const [k, v] of Object.entries(next)) {
-    run('INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value', k, JSON.stringify(v));
+    run('INSERT INTO company_settings (company_id, key, value) VALUES (?, ?, ?) ON CONFLICT(company_id, key) DO UPDATE SET value = excluded.value', companyId, k, JSON.stringify(v));
   }
-  return getSettings();
+  return getSettings(companyId);
 }
 
 // Versão pública (sem login): somente o necessário para desenhar login e tablet.
-function publicBranding() {
-  const s = getSettings();
+function publicBranding(companyId) {
+  const s = getSettings(companyId);
   return {
     companyName: s.companyName,
     primaryColor: s.primaryColor,
@@ -178,4 +209,4 @@ function publicBranding() {
   };
 }
 
-module.exports = { DEFAULTS, getSettings, saveSettings, publicBranding, emailList };
+module.exports = { DEFAULTS, getSettings, saveSettings, publicBranding, platformBranding, getPlatform, setPlatform, getState, setState, emailList };

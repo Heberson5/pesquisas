@@ -1,6 +1,9 @@
-# Pesquisa de Satisfação (NPS) — multi-filial
+# Pesquisa de Satisfação (NPS) — plataforma multiempresa
 
-Sistema de coleta de pesquisa de satisfação para **tablets em modo quiosque**, com **painel administrativo** e análise de **NPS**.
+Plataforma de pesquisa de satisfação para **tablets em modo quiosque** e **QR Code**, com **painel administrativo** e análise de **NPS**, para **várias empresas** no mesmo servidor.
+
+- **Multiempresa:** cada empresa enxerga só os próprios dados (unidades, pesquisas, respostas, usuários, configurações, auditoria). Contatos de clientes são criptografados com uma **chave própria de cada empresa**.
+- **Perfis:** **Master** (dono da plataforma: vê a lista de empresas e entra em uma delas por até 2 h, com motivo registrado na auditoria) → **Administrador** (tudo dentro da própria empresa, inclusive excluir respostas) → **Gestor** (as unidades dele; o Administrador pode liberar permissões extras: criar unidades, cadastrar gestores, LGPD, auditoria).
 
 - **Painel:** `/admin` — NPS geral/por filial/por pergunta, respostas, exportação CSV, pesquisas, filiais, tablets, usuários, auditoria.
 - **Configurações:** logo, favicon, ícone do app, cores, ícones do menu e estilo das respostas (números coloridos, carinhas coloridas, estrelas, corações…).
@@ -16,10 +19,15 @@ Sistema de coleta de pesquisa de satisfação para **tablets em modo quiosque**,
 
 ```bash
 npm install
-npm run create-admin -- voce@empresa.com "Seu Nome"
+npm run create-master  -- voce@seudominio.com.br "Seu Nome"          # dono da plataforma
+npm run create-company -- "Nome da Empresa" --cnpj 00000000000000    # primeira empresa
+npm run create-admin   -- admin@empresa.com.br "Nome" --empresa nome-da-empresa
 npm start          # http://127.0.0.1:3000/admin
-npm test           # 75 testes de segurança
+npm test           # 115 testes (segurança, isolamento entre empresas, migração)
+npm run seed:demo  # demonstração: Master + 2 empresas (nunca em produção)
 ```
+
+**Atualizando uma instalação de empresa única:** ao subir esta versão, o banco é migrado sozinho — os dados atuais viram a **empresa nº 1**, os usuários atuais continuam como Administradores/Gestores dela e os contatos são regravados com a chave da empresa. Faça um backup antes e crie o seu Master com `create-master`.
 
 Requer Node.js 22.13+.
 
