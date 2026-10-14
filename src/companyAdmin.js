@@ -125,9 +125,9 @@ function setStatus(companyId, status, reason) {
   if (status === cur.status) return cur.status;
   if (['suspended', 'canceled'].includes(status) && (!reason || String(reason).trim().length < 5)) throw bad('Informe o motivo (mínimo 5 caracteres).');
   tx(() => {
-    run(`UPDATE companies SET status = ?, status_reason = ?, canceled_at = CASE WHEN ? = 'canceled' THEN ? ELSE NULL END, updated_at = ?,
+    run(`UPDATE companies SET status = ?, status_reason = ?, lock_kind = CASE WHEN ? = 'suspended' THEN 'manual' ELSE NULL END, canceled_at = CASE WHEN ? = 'canceled' THEN ? ELSE NULL END, updated_at = ?,
         trial_ends_at = CASE WHEN ? = 'trial' THEN COALESCE(trial_ends_at, ?) ELSE trial_ends_at END WHERE id = ?`,
-    status, reason ? String(reason).trim().slice(0, 300) : null, status, Date.now(), Date.now(), status, Date.now() + 14 * 86_400_000, companyId);
+    status, reason ? String(reason).trim().slice(0, 300) : null, status, status, Date.now(), Date.now(), status, Date.now() + 14 * 86_400_000, companyId);
     if (['suspended', 'canceled'].includes(status)) {
       run('DELETE FROM sessions WHERE user_id IN (SELECT id FROM users WHERE company_id = ?)', companyId);
       run('UPDATE sessions SET acting_company_id = NULL, acting_until = NULL, acting_reason = NULL WHERE acting_company_id = ?', companyId);

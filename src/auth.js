@@ -51,6 +51,9 @@ function destroyUserSessions(userId) { run('DELETE FROM sessions WHERE user_id =
 
 const SAFE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
 const MFA_SETUP_ALLOWED = new Set(['GET /me', 'POST /mfa/setup', 'POST /mfa/enable', 'POST /logout']);
+// Empresa suspensa (falta de pagamento, fim do teste ou suspensão pela plataforma): o painel fica limitado à tela de pagamento.
+const LOCK_ALLOWED = new Set(['GET /me', 'POST /logout', 'POST /me/password', 'GET /billing', 'POST /billing/subscribe',
+  'GET /mfa', 'POST /mfa/setup', 'POST /mfa/enable', 'POST /mfa/disable', 'POST /mfa/recovery-codes']);
 
 // Unidades que um gestor pode ver: só as vinculadas a ele E da empresa em uso.
 const gestorScope = (userId, companyId) => all(`SELECT ub.branch_id FROM user_branches ub JOIN branches b ON b.id = ub.branch_id
@@ -86,7 +89,7 @@ function requireUser(req, res, next) {
       run('UPDATE sessions SET acting_company_id = NULL, acting_until = NULL, acting_reason = NULL WHERE token_hash = ?', s.token_hash);
     }
   }
-  const company = companyId ? get('SELECT id, name, slug, status, timezone FROM companies WHERE id = ?', companyId) : null;
+  const company = companyId ? get('SELECT id, name, slug, status, timezone, lock_kind, status_reason FROM companies WHERE id = ?', companyId) : null;
   if (s.role !== 'master') {
     if (!company) throw new HttpError(401, 'Sessão expirada. Faça login novamente.');
     if (company.status === 'canceled') {
@@ -101,6 +104,9 @@ function requireUser(req, res, next) {
     scope: s.role === 'gestor' && company ? gestorScope(s.user_id, company.id) : null,
     can: (p) => perms.has(p),
   };
+  if (company?.status === 'suspended' && s.role !== 'master' && !LOCK_ALLOWED.has(`${req.method} ${req.path}`)) {
+    return res.status(402).json({ error: company.lock_kind === 'manual' ? 'O acesso desta empresa está suspenso pela plataforma.' : 'Pagamento pendente: o acesso está limitado à tela de faturamento.', code: 'COMPANY_LOCKED' });
+  }
   // Usuário sem 2FA (quando obrigatório): só pode configurar o 2FA, ver seus dados ou sair.
   if (req.user.mfaSetupRequired && !MFA_SETUP_ALLOWED.has(`${req.method} ${req.path}`)) {
     return res.status(403).json({ error: 'Ative a autenticação em duas etapas para continuar.', code: 'MFA_SETUP_REQUIRED' });

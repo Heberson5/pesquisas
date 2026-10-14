@@ -8,6 +8,7 @@ const router = express.Router();
 router.use(requireUser);
 router.use(require('./account'));
 router.use(require('./master'));
+router.use(require('./billing'));
 router.use(require('./branches'));
 router.use(require('./surveys'));
 router.use(require('./responses'));
