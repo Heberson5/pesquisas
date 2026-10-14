@@ -60,11 +60,12 @@ function notifyDetractor(r, score, caseId) {
       queueEmail({ to, subject: `[Alerta] Nota ${score} em ${r.branch_name}`, text, html, kind: 'detractor', companyId: cid });
     }
   }
-  if (s.alerts.webhookUrl) {
+  const { hasFeature } = require('./plans');
+  if (s.alerts.webhookUrl && hasFeature(cid, 'webhook')) {
     queueWebhook(s.alerts.webhookUrl, { event: 'detractor', caseId, branch: r.branch_name, score, channel: r.channel,
       contactRequested: hasContact, submittedAt: new Date(r.submitted_at).toISOString(), url }, 'detractor', cid);
   }
-  if (s.alerts.whatsappTemplate) {
+  if (s.alerts.whatsappTemplate && hasFeature(cid, 'whatsapp')) {
     const phones = parseList(get('SELECT alert_phones FROM branches WHERE id = ? AND company_id = ?', r.branch_id, cid)?.alert_phones);
     // + WhatsApp pessoal dos usuários (gestores da filial e administradores) que quiserem o aviso
     const mine = all(`SELECT DISTINCT u.whatsapp FROM users u LEFT JOIN user_branches ub ON ub.user_id = u.id

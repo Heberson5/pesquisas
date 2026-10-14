@@ -17,6 +17,8 @@ const { publicUrl } = require('../config');
 const { parseLocal } = require('../time');
 const { companyTz } = require('../companies');
 
+const { assertLimit } = require('../plans');
+
 const router = express.Router();
 router.use(requireCompany);
 const PAIR_TTL_MS = 15 * 60_000;
@@ -85,6 +87,7 @@ router.post('/branches', requirePerm(P.BRANCH_CREATE), (req, res) => {
   const cid = req.user.companyId;
   const b = branchInput(req.body);
   if (get('SELECT 1 FROM branches WHERE company_id = ? AND code = ?', cid, b.code)) throw new HttpError(409, 'Já existe uma unidade com esse código.');
+  if (b.active) assertLimit(cid, 'branches');
   const newId = tx(() => {
     const r = run('INSERT INTO branches (company_id, code, name, city, active, alert_emails, alert_phones, nps_goal, hours_json, timezone, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)',
       cid, b.code, b.name, b.city, b.active, b.alert_emails, b.alert_phones, b.nps_goal, b.hours_json, b.timezone, Date.now());
@@ -101,6 +104,7 @@ router.put('/branches/:id', requirePerm(P.BRANCH_EDIT), (req, res) => {
   assertBranch(req.user, bid);
   const b = branchInput(req.body);
   if (get('SELECT 1 FROM branches WHERE company_id = ? AND code = ? AND id <> ?', req.user.companyId, b.code, bid)) throw new HttpError(409, 'Já existe uma unidade com esse código.');
+  if (b.active && !get('SELECT active FROM branches WHERE id = ? AND company_id = ?', bid, req.user.companyId).active) assertLimit(req.user.companyId, 'branches');
   run('UPDATE branches SET code = ?, name = ?, city = ?, active = ?, alert_emails = ?, alert_phones = ?, nps_goal = ?, hours_json = ?, timezone = ? WHERE id = ? AND company_id = ?',
     b.code, b.name, b.city, b.active, b.alert_emails, b.alert_phones, b.nps_goal, b.hours_json, b.timezone, bid, req.user.companyId);
   auditReq(req, 'branch.update', { id: bid, ...b }, bid);
@@ -215,6 +219,7 @@ router.post('/devices', requirePerm(P.DEVICES), (req, res) => {
   const branchId = id(req.body?.branchId, 'unidade');
   assertBranch(req.user, branchId);
   const name = str(req.body?.name, { field: 'nome', min: 2, max: 60 });
+  assertLimit(req.user.companyId, 'devices');
   const r = run('INSERT INTO devices (company_id, branch_id, name, created_at) VALUES (?,?,?,?)', req.user.companyId, branchId, name, Date.now());
   const pairing = issuePairingCode(req.user.companyId, Number(r.lastInsertRowid));
   auditReq(req, 'device.create', { id: r.lastInsertRowid, branchId, name }, branchId);

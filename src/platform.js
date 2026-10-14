@@ -5,8 +5,14 @@ const { getPlatform, setPlatform, platformBranding } = require('./settings');
 const { CAPACITY_DEFAULTS, capacity } = require('./health');
 const { bad, str, int, email } = require('./validate');
 
-const SIGNUP_DEFAULTS = { enabled: false, trialDays: 14 };
+const SIGNUP_DEFAULTS = { enabled: false, trialDays: 14, planId: null };
 const signupConfig = () => ({ ...SIGNUP_DEFAULTS, ...(getPlatform('signup', {}) || {}) });
+const planRef = (v) => {
+  if (v === null || v === '') return null;
+  const pid = int(v, { field: 'plano', min: 1 });
+  if (!require('./db').get('SELECT 1 FROM plans WHERE id = ? AND active = 1', pid)) throw bad('Plano inexistente ou desativado.');
+  return pid;
+};
 const flag = (v, field) => { if (typeof v !== 'boolean') throw bad(`Valor inválido em "${field}".`); return v; };
 const color = (v, field) => { if (typeof v !== 'string' || !/^#[0-9a-f]{6}$/i.test(v)) throw bad(`Cor inválida em "${field}" (use #rrggbb).`); return v.toLowerCase(); };
 
@@ -39,6 +45,7 @@ function save(input = {}) {
     setPlatform('signup', {
       enabled: s.enabled !== undefined ? flag(s.enabled, 'autocadastro') : cur.enabled,
       trialDays: s.trialDays !== undefined ? int(s.trialDays, { field: 'dias de teste grátis', min: 1, max: 90 }) : cur.trialDays,
+      planId: s.planId !== undefined ? planRef(s.planId) : cur.planId,
     });
     changed.push('autocadastro');
   }

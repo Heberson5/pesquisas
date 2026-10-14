@@ -11,6 +11,8 @@ const { computeBreakdown } = require('../stats');
 const { scope } = require('../scope');
 const { MEDIA_MAX, sniffMime, saveMedia, mediaOf } = require('../media');
 
+const { assertLimit } = require('../plans');
+
 const router = express.Router();
 router.use(requireCompany);
 
@@ -100,6 +102,7 @@ function insertQuestions(surveyId, questions) {
 router.post('/surveys', requirePerm(P.SURVEYS), (req, res) => {
   const cid = req.user.companyId;
   const s = surveyInput(cid, req.body);
+  if (s.active) assertLimit(cid, 'surveys');
   const now = Date.now();
   const newId = tx(() => {
     const r = run(`INSERT INTO surveys (company_id, title, welcome_title, welcome_text, thanks_title, thanks_text, thanks_media_id,
@@ -120,6 +123,7 @@ router.put('/surveys/:id', requirePerm(P.SURVEYS), (req, res) => {
   if (!current) throw new HttpError(404, 'Pesquisa não encontrada.');
   if (!canEditSurvey(req.user, sid)) throw new HttpError(403, 'Esta pesquisa também é usada em unidades que não são suas. Peça ao administrador ou use "Duplicar".');
   const s = surveyInput(cid, req.body);
+  if (s.active && !current.active) assertLimit(cid, 'surveys');
   const hasResponses = !!get('SELECT 1 FROM responses WHERE survey_id = ? AND company_id = ? LIMIT 1', sid, cid);
   tx(() => {
     run(`UPDATE surveys SET title=?, welcome_title=?, welcome_text=?, thanks_title=?, thanks_text=?, thanks_media_id=?,
@@ -153,6 +157,7 @@ router.post('/surveys/:id/duplicate', requirePerm(P.SURVEYS), (req, res) => {
   const cid = req.user.companyId;
   const src = loadSurvey(id(req.params.id), cid);
   if (!src) throw new HttpError(404, 'Pesquisa não encontrada.');
+  assertLimit(cid, 'surveys');
   const now = Date.now();
   const newId = tx(() => {
     const r = run(`INSERT INTO surveys (company_id, title, welcome_title, welcome_text, thanks_title, thanks_text, thanks_media_id,

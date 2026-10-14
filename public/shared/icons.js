@@ -73,7 +73,7 @@
   // Itens do menu e ícone padrão de cada um.
   const MENU_DEFAULTS = {
     dashboard: 'layout', casos: 'bell', respostas: 'inbox', pesquisas: 'clipboard', filiais: 'store', dispositivos: 'tablet',
-    usuarios: 'users', configuracoes: 'settings', auditoria: 'history', conta: 'user_cog', empresas: 'building', plataforma: 'sliders', saude: 'activity', 'auditoria-plataforma': 'shield',
+    usuarios: 'users', configuracoes: 'settings', auditoria: 'history', conta: 'user_cog', empresas: 'building', plataforma: 'sliders', saude: 'activity', 'auditoria-plataforma': 'shield', planos: 'award', plano: 'award',
   };
 
   const MENU_ICONS = Object.keys(ICONS).filter((k) => !ICONS[k].ui && !ICONS[k].rating);

@@ -42,7 +42,7 @@ router.post('/', requireEnabled, limiter, async (req, res) => {
   if (err) throw bad(err);
   const cfg = signupConfig();
   const r = await registerCompany({ cnpj: b.cnpj, name: b.name, contactEmail: b.email, billingEmail: b.email },
-    { origin: 'self', status: 'trial', trialDays: cfg.trialDays, admin: { name: b.adminName, email: b.email, password: b.password }, allowManual: false });
+    { origin: 'self', status: 'trial', trialDays: cfg.trialDays, planId: cfg.planId, admin: { name: b.adminName, email: b.email, password: b.password }, allowManual: false });
   audit(r.userId, 'company.self_signup', { id: r.id, name: b.name, cnpj: cnpjLib.digits(b.cnpj) }, req.ip, { companyId: null });
   audit(r.userId, 'company.self_signup', { name: b.name }, req.ip, { companyId: r.id });
   // Avisa os Masters.

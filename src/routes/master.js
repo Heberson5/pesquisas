@@ -26,7 +26,8 @@ const pAudit = (req, action, detail, companyId = null) => {
 };
 
 router.get('/master/companies', (req, res) => {
-  const rows = all(`SELECT c.id, c.name, c.slug, c.status, c.cnpj, c.created_at, c.trial_ends_at, c.origin, c.receita_status,
+  const rows = all(`SELECT c.id, c.name, c.slug, c.status, c.cnpj, c.created_at, c.trial_ends_at, c.origin, c.receita_status, c.plan_id,
+      (SELECT p.name FROM plans p WHERE p.id = c.plan_id) AS plan_name,
       (SELECT COUNT(*) FROM branches b WHERE b.company_id = c.id) AS branches,
       (SELECT COUNT(*) FROM devices d WHERE d.company_id = c.id AND d.active = 1) AS devices,
       (SELECT COUNT(*) FROM users u WHERE u.company_id = c.id AND u.active = 1) AS users,
@@ -49,7 +50,9 @@ router.post('/master/companies', async (req, res) => {
   const b = req.body || {};
   const status = b.status === 'active' ? 'active' : 'trial';
   const trialDays = b.trialDays !== undefined ? int(b.trialDays, { field: 'dias de teste', min: 1, max: 90 }) : platform.signupConfig().trialDays;
-  const r = await admin.registerCompany(b, { origin: 'master', status, trialDays, admin: b.admin?.email ? b.admin : null, invitedBy: req.user.name });
+  const planId = b.planId ? id(b.planId, 'plano') : null;
+  if (planId && !get('SELECT 1 FROM plans WHERE id = ?', planId)) throw bad('Plano inexistente.');
+  const r = await admin.registerCompany(b, { origin: 'master', status, trialDays, planId, admin: b.admin?.email ? b.admin : null, invitedBy: req.user.name });
   pAudit(req, 'company.create', { id: r.id, name: b.name, cnpj: cnpjLib.digits(b.cnpj), status, receita: r.receita, manual: r.manual, adminInvited: !!r.userId }, r.id);
   res.status(201).json(r);
 });
@@ -120,6 +123,46 @@ router.delete('/master/companies/:id', (req, res) => {
   const r = admin.purgeCompany(cid);
   audit(req.user.id, 'company.purged', r, req.ip, { companyId: null, asMaster: true });
   res.json({ ok: true, ...r });
+});
+
+// ---------------------------------------------------------------- planos
+const plans = require('../plans');
+router.get('/master/plans', (req, res) => {
+  const counts = Object.fromEntries(all('SELECT plan_id, COUNT(*) AS n FROM companies WHERE plan_id IS NOT NULL GROUP BY plan_id /* tenant-ok: contagem por plano */').map((r) => [r.plan_id, r.n]));
+  res.json({ plans: plans.listPlans().map((p) => ({ ...p, companies: counts[p.id] || 0 })), limits: plans.LIMITS, features: plans.FEATURES });
+});
+router.post('/master/plans', (req, res) => {
+  const pid = plans.savePlan(null, req.body || {});
+  pAudit(req, 'plan.create', { id: pid, name: req.body?.name });
+  res.status(201).json({ id: pid });
+});
+router.put('/master/plans/:id', (req, res) => {
+  const pid = id(req.params.id);
+  plans.savePlan(pid, req.body || {});
+  pAudit(req, 'plan.update', { id: pid, name: req.body?.name, priceCents: req.body?.priceCents });
+  res.json({ ok: true });
+});
+// Plano em uso não é apagado (desative para não aparecer mais); sem uso pode ser excluído.
+router.delete('/master/plans/:id', (req, res) => {
+  const pid = id(req.params.id);
+  const p = get('SELECT name FROM plans WHERE id = ?', pid);
+  if (!p) throw new HttpError(404, 'Plano não encontrado.');
+  if (get('SELECT 1 FROM companies WHERE plan_id = ? /* tenant-ok: uso do plano */', pid)) throw new HttpError(409, 'Há empresas neste plano. Troque o plano delas ou apenas desative este.');
+  run('DELETE FROM plans WHERE id = ?', pid);
+  pAudit(req, 'plan.delete', { id: pid, name: p.name });
+  res.json({ ok: true });
+});
+// Troca o plano de uma empresa (null = sem limites).
+router.post('/master/companies/:id/plan', (req, res) => {
+  const cid = id(req.params.id);
+  const c = get('SELECT plan_id FROM companies WHERE id = ?', cid);
+  if (!c) throw new HttpError(404, 'Empresa não encontrada.');
+  const planId = req.body?.planId === null ? null : id(req.body?.planId, 'plano');
+  const p = planId ? get('SELECT name FROM plans WHERE id = ?', planId) : null;
+  if (planId && !p) throw bad('Plano inexistente.');
+  run('UPDATE companies SET plan_id = ?, updated_at = ? WHERE id = ?', planId, Date.now(), cid);
+  pAudit(req, 'company.plan', { id: cid, from: c.plan_id, to: planId, plan: p?.name || 'sem limites' }, cid);
+  res.json({ ok: true });
 });
 
 // ---------------------------------------------------------------- entrar / sair de uma empresa

@@ -88,6 +88,7 @@ router.get('/responses.csv', requirePerm(P.EXPORT), (req, res) => {
 });
 
 router.get('/report.pptx', requirePerm(P.EXPORT), async (req, res) => {
+  require('../plans').assertFeature(req.user.companyId, 'pptx');
   const { buffer: buf } = await reportFor(req.user, req.query, req.user.name);
   auditReq(req, 'report.pptx', { filter: req.query });
   res.set('Content-Type', 'application/vnd.openxmlformats-officedocument.presentationml.presentation');
