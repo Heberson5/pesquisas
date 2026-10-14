@@ -49,6 +49,8 @@
     }
     const data = await res.json().catch(() => ({}));
     if (res.status === 403 && data.code === 'MFA_SETUP_REQUIRED') { showMfaSetup(true); throw new Error('401'); }
+    // Empresa suspensa: recarrega a situação e leva para a tela de faturamento.
+    if (res.status === 402 && data.code === 'COMPANY_LOCKED' && path !== '/me') { me = null; location.hash = '#/faturamento'; route(); throw new Error('401'); }
     if (!res.ok) { const e = new Error(data.error || 'Erro ' + res.status); e.status = res.status; throw e; }
     return data;
   }
@@ -280,13 +282,21 @@
   }
   const ROLE_LABEL = { master: 'Master', admin: 'Administrador', gestor: 'Gestor de unidade' };
   // Página visível? Sem empresa em uso (Master fora de uma empresa) só aparecem as páginas da plataforma.
-  const canSee = (p) => (p[3] === 'master' ? me.role === 'master' : !!me.company && (!p[3] || (typeof p[3] === 'function' ? p[3]() : me.can(p[3]))));
+  const locked = () => me.company?.status === 'suspended' && me.role !== 'master';
+  const canSee = (p) => {
+    if (p[3] === 'master') return me.role === 'master';
+    if (!me.company) return false;
+    if (locked()) return p[0] === 'faturamento';
+    if (p[0] === 'faturamento') return me.can('settings.manage') && (me.role !== 'master' || !!me.acting);
+    return !p[3] || (typeof p[3] === 'function' ? p[3]() : me.can(p[3]));
+  };
 
   // ------------------------------------------------------------ layout + rotas
   // [rota, rótulo, página, permissão exigida ('master' = só o Master), grupo]
   const PAGES = [
     ['empresas', 'Empresas', pageCompanies, 'master', 'Plataforma'],
     ['planos', 'Planos', pagePlans, 'master', 'Plataforma'],
+    ['faturas', 'Faturas', pageInvoices, 'master', 'Plataforma'],
     ['plataforma', 'Configurações gerais', pagePlatform, 'master', 'Plataforma'],
     ['saude', 'Saúde da plataforma', pageHealth, 'master', 'Plataforma'],
     ['auditoria-plataforma', 'Auditoria da plataforma', pagePlatformAudit, 'master', 'Plataforma'],
@@ -298,6 +308,7 @@
     ['dispositivos', 'Tablets', pageDevices, null, 'Coleta'],
     ['usuarios', 'Usuários', pageUsers, () => me.can('users.manage') || me.can('users.gestores'), 'Administração'],
     ['plano', 'Plano e uso', pageMyPlan, 'settings.manage', 'Administração'],
+    ['faturamento', 'Faturamento', pageBilling, () => true, 'Administração'],
     ['configuracoes', 'Configurações', pageSettings, 'settings.manage', 'Administração'],
     ['auditoria', 'Auditoria', pageAudit, 'audit.view', 'Administração'],
     ['conta', 'Minha conta', pageAccount, () => true, 'Administração'],
@@ -341,7 +352,7 @@
         h('div', { class: 'mobile-bar' },
           h('button', { class: 'btn secondary icon-only', 'aria-label': 'Abrir menu', onclick: () => shell.classList.add('mobile-open') }, icon('menu')),
           h('b', {}, branding.companyName)),
-        actingBanner(),
+        actingBanner(), billingBanner(),
         h('main', { class: 'main' }, content)));
     shell.addEventListener('click', (e) => { if (e.target === shell) shell.classList.remove('mobile-open'); });
     root.replaceChildren(shell);
@@ -355,7 +366,7 @@
     if (!me) { try { await loadMe(); } catch { return; } }
     const [, name = 'dashboard', param] = location.hash.split('/');
     const visible = PAGES.filter((p) => p[0] === 'conta' || canSee(p));
-    const page = visible.find((p) => p[0] === name) || visible[0];
+    const page = visible.find((p) => p[0] === name) || (locked() ? visible.find((p) => p[0] === 'faturamento') : null) || visible[0];
     const container = h('div', {}, h('p', { class: 'muted' }, 'Carregando…'));
     layout(page[0], container);
     try { container.replaceChildren(await page[2](param)); } catch (e) { if (e.message !== '401') container.replaceChildren(h('div', { class: 'card bad' }, e.message)); }
@@ -1101,6 +1112,138 @@
       h('p', { class: 'small muted' }, 'Tablet perdido? Use "Revogar". Sem internet, as respostas ficam guardadas e são enviadas depois. O guia completo está em docs/INSTALACAO-TABLET.md.')));
   }
 
+  // ------------------------------------------------------------ faturamento
+  const INV_STATUS = { open: ['warn', 'Em aberto'], paid: ['ok', 'Paga'], canceled: ['', 'Cancelada'] };
+  const METHOD = { card: 'Cartão (assinatura)', pix: 'PIX', boleto: 'Boleto', pix_boleto: 'PIX/boleto', manual: 'Baixa manual', account_money: 'Saldo Mercado Pago' };
+  const invStatus = (i) => (i.status === 'open' && i.due_date < isoDay(new Date()) ? h('span', { class: 'badge off' }, 'Vencida') : h('span', { class: 'badge ' + INV_STATUS[i.status][0] }, INV_STATUS[i.status][1]));
+
+  // Avisos no topo: teste grátis terminando e fatura vencida (antes da suspensão).
+  function billingBanner() {
+    const c = me.company;
+    if (!c || me.role === 'master') return null;
+    if (c.status === 'past_due') return h('div', { class: 'acting-banner bad-banner', role: 'alert' }, icon('bell', 16), h('span', {}, h('b', {}, 'Fatura vencida. '), c.statusReason || '', ' Pague para evitar a suspensão no fim do 5º dia útil após o vencimento.'),
+      me.can('settings.manage') ? h('a', { class: 'btn secondary sm', href: '#/faturamento' }, 'Ver faturas') : null);
+    if (c.status === 'trial' && c.trialEndsAt) {
+      const days = Math.ceil((c.trialEndsAt - Date.now()) / 86_400_000);
+      if (days <= 7) return h('div', { class: 'acting-banner', role: 'status' }, icon('calendar', 16), h('span', {}, `Seu teste grátis termina ${days <= 0 ? 'hoje' : days === 1 ? 'amanhã' : `em ${days} dias`} (${fmtDay(c.trialEndsAt)}). Assine para não interromper as pesquisas.`),
+        me.can('settings.manage') ? h('a', { class: 'btn secondary sm', href: '#/faturamento' }, 'Assinar agora') : null);
+    }
+    return null;
+  }
+
+  async function pageBilling() {
+    const o = await api('/billing');
+    const c = o.company;
+    const lockedMsg = c.lock_kind === 'trial_expired' ? 'O teste grátis terminou. Para voltar a usar o painel, os tablets e o QR Code, assine abaixo.'
+      : c.lock_kind === 'overdue' ? 'O acesso foi suspenso porque uma fatura não foi paga até o fim do 5º dia útil após o vencimento. Assim que o pagamento for confirmado, tudo volta na hora.'
+        : c.lock_kind === 'manual' ? `O acesso desta empresa foi suspenso pela plataforma${c.status_reason ? ': ' + c.status_reason : ''}. Fale com o suporte.` : null;
+    if (o.limited) {
+      return h('div', {}, pageHead('Faturamento', ''), h('div', { class: 'card warn-card' }, h('h2', {}, o.locked ? 'Acesso suspenso' : 'Faturamento'),
+        h('p', {}, o.locked ? (lockedMsg || 'O acesso está suspenso.') : 'Os dados de cobrança são vistos pelo administrador da empresa.'),
+        o.locked && c.lock_kind !== 'manual' ? h('p', {}, 'Peça ao administrador da sua empresa para regularizar o pagamento.') : null));
+    }
+    const subscribe = async () => {
+      try { const r = await api('/billing/subscribe', { method: 'POST' }); location.href = r.url; } catch (ex) { toast(ex.message, true); }
+    };
+    const plan = o.plan;
+    const card = c.billing_method !== 'pix_boleto';
+    const subOk = c.mp_preapproval_status === 'authorized';
+    const action = !plan || !plan.priceCents ? h('p', { class: 'muted' }, 'Sua empresa ainda não tem um plano pago definido. Fale com o suporte da plataforma.')
+      : !o.mpConfigured ? h('p', { class: 'muted' }, 'O pagamento on-line ainda não está disponível. Fale com o suporte da plataforma.')
+        : card ? (subOk ? h('p', {}, h('span', { class: 'badge ok' }, '✓ Assinatura ativa no cartão'), ' A cobrança é automática todo mês, no cartão cadastrado no Mercado Pago.')
+          : h('div', {}, h('p', {}, `Assine o plano ${plan.name} por ${money(plan.priceCents)} por mês no cartão de crédito. O cartão é cadastrado na página segura do Mercado Pago — ele não passa pelo nosso sistema.`),
+            h('button', { class: 'btn', onclick: subscribe }, icon('lock', 16), c.mp_preapproval_status === 'pending' ? 'Continuar assinatura no Mercado Pago' : 'Assinar com cartão (Mercado Pago)')))
+          : h('p', {}, 'A cobrança da sua empresa é por PIX ou boleto: as faturas aparecem abaixo com o link de pagamento e também chegam por e-mail.');
+    if (o.locked && !document.querySelector('.modal-bg')) {
+      // Pop-up obrigatório: com a empresa suspensa, não há outra tela.
+      setTimeout(() => modal('Pagamento necessário', h('div', {}, h('p', {}, lockedMsg)), []), 50);
+    }
+    return h('div', {}, pageHead('Faturamento', plan ? `Plano ${plan.name} · ${money(plan.priceCents)} por mês` : ''),
+      lockedMsg ? h('div', { class: 'card warn-card' }, h('b', {}, lockedMsg)) : null,
+      o.graceDeadline && !o.locked ? h('div', { class: 'card warn-card' }, h('b', {}, `Fatura vencida: pague até ${fmtDate(o.graceDeadline - 1).split(' ')[0]} para evitar a suspensão.`)) : null,
+      c.status === 'trial' && c.trial_ends_at ? h('div', { class: 'card' }, h('p', {}, `Teste grátis até ${fmtDay(c.trial_ends_at)}.`)) : null,
+      h('div', { class: 'card' }, h('h2', {}, 'Forma de pagamento'), action),
+      h('div', { class: 'card table-wrap' }, h('h2', {}, 'Faturas'),
+        o.invoices.length ? h('table', {}, h('thead', {}, h('tr', {}, ['Descrição', 'Vencimento', 'Valor', 'Situação', 'Pago em', ''].map((t) => h('th', {}, t)))),
+          h('tbody', {}, o.invoices.map((i) => h('tr', {}, h('td', {}, i.description), h('td', {}, fmtDay(Date.parse(i.due_date + 'T12:00:00'))), h('td', {}, money(i.amount_cents)),
+            h('td', {}, invStatus(i)), h('td', {}, i.paid_at ? fmtDay(i.paid_at) + (i.method ? ` · ${METHOD[i.method] || i.method}` : '') : '—'),
+            h('td', {}, i.status === 'open' && i.checkout_url ? h('a', { class: 'btn sm', href: i.checkout_url, target: '_blank', rel: 'noopener noreferrer' }, 'Pagar (PIX/boleto)') : null)))))
+          : h('p', { class: 'muted' }, 'Nenhuma fatura ainda.')));
+  }
+
+  // Master: todas as faturas.
+  async function pageInvoices() {
+    const st = h('select', {}, h('option', { value: 'overdue' }, 'Vencidas'), h('option', { value: 'open' }, 'Em aberto'), h('option', { value: 'paid' }, 'Pagas'), h('option', { value: '' }, 'Todas'));
+    st.value = prefs.get('invStatus', 'overdue');
+    const body = h('div', { class: 'card table-wrap' });
+    const load = async () => {
+      prefs.set('invStatus', st.value);
+      const rows = await api('/master/invoices?status=' + st.value);
+      body.replaceChildren(rows.length ? h('table', {}, h('thead', {}, h('tr', {}, ['Empresa', 'Descrição', 'Vencimento', 'Valor', 'Situação', 'Forma'].map((t) => h('th', {}, t)))),
+        h('tbody', {}, rows.map((i) => h('tr', {}, h('td', {}, h('a', { href: '#/empresas/' + i.company_id }, i.company)), h('td', {}, i.description),
+          h('td', {}, fmtDay(Date.parse(i.due_date + 'T12:00:00'))), h('td', {}, money(i.amount_cents)), h('td', {}, invStatus(i)), h('td', {}, METHOD[i.method] || i.method || '—')))))
+        : h('p', { class: 'muted' }, 'Nenhuma fatura com esse filtro.'));
+    };
+    st.addEventListener('change', load); await load();
+    const total = h('span');
+    return h('div', {}, pageHead('Faturas', 'Cobranças de todas as empresas', h('button', { class: 'btn secondary', onclick: async () => {
+      try { const r = await api('/master/billing/run', { method: 'POST' }); toast(`Rotina executada: ${r.invoices} fatura(s) criada(s), ${r.sent} enviada(s).`); load(); } catch (ex) { toast(ex.message, true); }
+    } }, icon('refresh', 16), 'Rodar cobrança agora')), h('div', { class: 'card filters' }, h('label', { class: 'f' }, 'Situação', st), total), body);
+  }
+
+  // Ficha da empresa (Master): forma de cobrança, assinatura e faturas com ações.
+  async function companyBillingCard(cid) {
+    const o = await api(`/master/companies/${cid}/billing`);
+    const c = o.company;
+    const method = h('select', {}, h('option', { value: 'card' }, 'Cartão (assinatura feita pelo cliente)'), h('option', { value: 'pix_boleto' }, 'PIX/boleto (gerado pela plataforma)'));
+    method.value = c.billing_method || 'card';
+    const day = h('input', { type: 'number', min: '1', max: '28', value: c.billing_day ?? '', placeholder: 'ex.: 10' });
+    const auto = h('input', { type: 'checkbox', checked: !!c.auto_invoice });
+    const newInv = () => {
+      const amount = h('input', { type: 'number', min: '0.01', step: '0.01', value: o.plan?.priceCents ? (o.plan.priceCents / 100).toFixed(2) : '' });
+      const desc = h('input', { maxlength: '200', value: o.plan ? `Assinatura ${o.plan.name}` : '' });
+      const due = h('input', { type: 'date', value: isoDay(new Date(Date.now() + 5 * 86_400_000)) });
+      modal('Nova fatura', h('div', { class: 'form-grid' }, h('label', { class: 'f' }, 'Descrição', desc), h('label', { class: 'f' }, 'Valor (R$)', amount), h('label', { class: 'f' }, 'Vencimento', due)),
+        [{ label: 'Criar', onClick: async (close) => {
+          try { await api(`/master/companies/${cid}/invoices`, { method: 'POST', body: { description: desc.value, amountCents: Math.round(Number(amount.value) * 100), dueDate: due.value } }); close(); toast('Fatura criada.'); route(); } catch (ex) { toast(ex.message, true); }
+        } }]);
+    };
+    const act = (i) => h('div', { class: 'row wrap' },
+      i.status === 'open' ? h('button', { class: 'btn secondary sm', onclick: async () => {
+        try { const r = await api(`/master/invoices/${i.id}/pix`, { method: 'POST', body: { send: true } }); toast('Link de PIX/boleto gerado e enviado por e-mail.'); navigator.clipboard?.writeText(r.url).catch(() => {}); route(); } catch (ex) { toast(ex.message, true); }
+      } }, i.checkout_url ? 'Reenviar PIX/boleto' : 'Gerar e enviar PIX/boleto') : null,
+      i.status === 'open' ? h('button', { class: 'btn secondary sm', onclick: () => {
+        const note = h('input', { maxlength: '200', placeholder: 'Ex.: pago por transferência em 10/11' });
+        modal('Dar baixa manual', h('label', { class: 'f' }, 'Observação (obrigatória)', note), [{ label: 'Marcar como paga', onClick: async (close) => {
+          try { await api(`/master/invoices/${i.id}/paid`, { method: 'POST', body: { note: note.value } }); close(); toast('Fatura paga.'); route(); } catch (ex) { toast(ex.message, true); }
+        } }]);
+      } }, 'Baixa manual') : null,
+      i.status === 'open' ? h('button', { class: 'btn danger sm', onclick: async () => {
+        const reason = prompt('Motivo do cancelamento da fatura:'); if (!reason) return;
+        try { await api(`/master/invoices/${i.id}/cancel`, { method: 'POST', body: { reason } }); toast('Fatura cancelada.'); route(); } catch (ex) { toast(ex.message, true); }
+      } }, 'Cancelar') : null);
+    const SUB = { authorized: ['ok', 'ativa'], pending: ['warn', 'aguardando o cliente'], paused: ['warn', 'pausada'], cancelled: ['off', 'cancelada'] };
+    const sub = SUB[c.mp_preapproval_status];
+    return h('div', { class: 'card' }, h('div', { class: 'topbar' }, h('h2', {}, 'Cobrança'), h('button', { class: 'btn secondary sm', onclick: newInv }, icon('plus', 14), 'Nova fatura')),
+      o.mpConfigured ? null : h('p', { class: 'warn-text small' }, 'Mercado Pago ainda não configurado (Configurações gerais → Faturamento).'),
+      h('div', { class: 'form-grid' }, h('label', { class: 'f' }, 'Forma de cobrança', method), h('label', { class: 'f' }, 'Dia do vencimento (1 a 28)', day),
+        h('label', { class: 'chk' }, auto, h('span', {}, 'PIX/boleto: gerar e enviar a fatura automaticamente', h('div', { class: 'small muted' }, 'Sete dias antes do vencimento, por e-mail.')))),
+      h('div', { class: 'row mt' }, h('button', { class: 'btn secondary', onclick: async () => {
+        try { await api(`/master/companies/${cid}/billing`, { method: 'POST', body: { method: method.value, billingDay: day.value === '' ? null : Number(day.value), autoInvoice: auto.checked } }); toast('Cobrança salva.'); route(); } catch (ex) { toast(ex.message, true); }
+      } }, 'Salvar cobrança'),
+        sub ? h('span', {}, 'Assinatura no cartão: ', h('span', { class: 'badge ' + sub[0] }, sub[1])) : h('span', { class: 'muted small' }, 'Sem assinatura no cartão.'),
+        c.mp_preapproval_status === 'authorized' ? h('button', { class: 'btn danger sm', onclick: () => {
+          const conf = confirmFields();
+          modal('Cancelar assinatura no cartão', h('div', {}, h('p', {}, 'O Mercado Pago deixa de cobrar o cartão do cliente.'), conf.el), [{ label: 'Cancelar assinatura', cls: 'danger', onClick: async (close) => {
+            try { await api(`/master/companies/${cid}/subscription/cancel`, { method: 'POST', body: conf.value() }); close(); toast('Assinatura cancelada.'); route(); } catch (ex) { toast(ex.message, true); }
+          } }]);
+        } }, 'Cancelar assinatura') : null),
+      o.invoices.length ? h('div', { class: 'table-wrap mt' }, h('table', {}, h('thead', {}, h('tr', {}, ['Descrição', 'Vencimento', 'Valor', 'Situação', 'Forma', ''].map((t) => h('th', {}, t)))),
+        h('tbody', {}, o.invoices.map((i) => h('tr', {}, h('td', {}, i.description), h('td', {}, fmtDay(Date.parse(i.due_date + 'T12:00:00'))), h('td', {}, money(i.amount_cents)),
+          h('td', {}, invStatus(i)), h('td', {}, METHOD[i.method] || i.method || '—'), h('td', {}, act(i)))))))
+        : h('p', { class: 'muted mt' }, 'Nenhuma fatura.'));
+  }
+
   // ------------------------------------------------------------ Master: empresas da plataforma
   // Faixa fixa quando o Master está dentro de uma empresa: deixa claro onde ele está e até quando.
   function actingBanner() {
@@ -1292,6 +1435,7 @@
       h('div', { class: 'card' }, h('div', { class: 'topbar' }, h('h2', {}, 'Plano e uso'), h('div', { class: 'row' }, planSel, h('button', { class: 'btn secondary sm', onclick: async () => {
         try { await api(`/master/companies/${cid}/plan`, { method: 'POST', body: { planId: planSel.value ? Number(planSel.value) : null } }); toast('Plano alterado.'); route(); } catch (ex) { toast(ex.message, true); }
       } }, 'Trocar plano'))), usageTable(c.planUsage)),
+      await companyBillingCard(cid),
       h('div', { class: 'card' }, h('div', { class: 'topbar' }, h('h2', {}, 'Administradores'), h('button', { class: 'btn secondary sm', onclick: invite }, icon('plus', 14), 'Convidar administrador')),
         c.admins.length ? h('div', { class: 'table-wrap' }, h('table', {}, h('thead', {}, h('tr', {}, ['Nome', 'E-mail', '2FA', 'Situação', ''].map((t) => h('th', {}, t)))),
           h('tbody', {}, c.admins.map((u) => h('tr', {}, h('td', {}, u.name), h('td', {}, u.email), h('td', {}, u.totp_enabled ? h('span', { class: 'badge ok' }, 'Ativo') : h('span', { class: 'badge warn' }, 'Não')),
@@ -1393,6 +1537,24 @@
         toast('Configurações gerais salvas.'); route();
       } catch (ex) { toast(ex.message, true); }
     };
+    const mpv = await api('/master/billing');
+    const mpToken = h('input', { type: 'password', autocomplete: 'off', placeholder: mpv.tokenSet ? `${mpv.tokenHint} (cadastrado — deixe em branco para manter)` : 'APP_USR-… (Access Token de produção)' });
+    const mpSecret = h('input', { type: 'password', autocomplete: 'off', placeholder: mpv.secretSet ? '•••••••• (cadastrada — deixe em branco para manter)' : 'Assinatura secreta dos webhooks' });
+    const mpCard = h('div', { class: 'card' }, h('h2', {}, 'Faturamento (Mercado Pago)'),
+      h('p', {}, mpv.configured ? h('span', { class: 'badge ok' }, mpv.sandbox ? 'Configurado (modo de TESTE)' : 'Configurado') : h('span', { class: 'badge warn' }, 'Não configurado')),
+      h('ol', { class: 'small muted steps' },
+        h('li', {}, 'No Mercado Pago: Seu negócio → Configurações → Gestão e administração → Credenciais (ou developers → Suas integrações). Copie o Access Token de produção.'),
+        h('li', {}, 'Em Suas integrações → Webhooks: cadastre a URL abaixo, marque "Pagamentos" e "Planos e assinaturas" e copie a Assinatura secreta.'),
+        h('li', {}, 'Use "Testar conexão". Para testes, use as credenciais de teste (começam com TEST-).')),
+      h('p', { class: 'small' }, 'URL de notificações: ', h('code', { class: 'secret' }, location.origin + '/api/webhooks/mercadopago')),
+      h('div', { class: 'form-grid' }, h('label', { class: 'f' }, 'Access Token', mpToken), h('label', { class: 'f' }, 'Assinatura secreta (webhook)', mpSecret)),
+      h('div', { class: 'row' }, h('button', { class: 'btn', onclick: async () => {
+        try { await api('/master/billing', { method: 'PUT', body: { accessToken: mpToken.value, webhookSecret: mpSecret.value } }); toast('Mercado Pago salvo.'); route(); } catch (ex) { toast(ex.message, true); }
+      } }, 'Salvar Mercado Pago'),
+      mpv.configured ? h('button', { class: 'btn secondary', onclick: async () => {
+        try { const r = await api('/master/billing/test', { method: 'POST' }); toast(`Conexão OK: conta ${r.account.nickname || r.account.id}.`); } catch (ex) { toast(ex.message, true); }
+      } }, 'Testar conexão') : null),
+      h('p', { class: 'small muted' }, 'Inadimplência: a empresa fica "em atraso" após o vencimento e é suspensa no fim do 5º dia útil (sem sábados, domingos e feriados nacionais).'));
     const delivery = h('div', {}, h('p', { class: 'muted' }, 'Carregando…'));
     deliveryTab(null, () => route(), { platform: true }).then((el) => delivery.replaceChildren(el)).catch((ex) => delivery.replaceChildren(h('p', { class: 'bad' }, ex.message)));
     return h('div', {}, pageHead('Plataforma', 'Configurações gerais que valem para todas as empresas', h('button', { class: 'btn', onclick: save }, 'Salvar')),
@@ -1412,6 +1574,7 @@
             h('label', { class: 'f' }, 'Respostas por dia', num(st.capacity, 'responsesPerDayLimit', 100, 100000000)),
             h('label', { class: 'f' }, 'Tablets ativos', num(st.capacity, 'devicesLimit', 10, 10000000)), h('label', { class: 'f' }, 'Empresas ativas', num(st.capacity, 'companiesLimit', 1, 1000000))),
           h('label', { class: 'f' }, 'Também avisar (e-mails)', emails))),
+      mpCard,
       h('h2', { class: 'mt' }, 'E-mail e WhatsApp padrão da plataforma'),
       h('p', { class: 'small muted' }, 'Usados pelas empresas que não configurarem os próprios, e para convites, recuperação de senha e avisos da plataforma.'),
       delivery);
@@ -1850,6 +2013,21 @@
       case 'plan.update': return E('cadastros', '', `Alterou o plano "${d.name || ''}"`, d.priceCents !== undefined ? 'Preço: ' + money(Number(d.priceCents) || 0) : '');
       case 'plan.delete': return E('cadastros', 'warn', `Excluiu o plano "${d.name || ''}"`);
       case 'company.plan': return E('cadastros', '', `Trocou o plano da empresa para: ${d.plan || '—'}`);
+      case 'billing.status': return E('dados', d.to === 'suspended' ? 'bad' : d.to === 'past_due' ? 'warn' : 'ok', `Situação alterada pelo faturamento: ${({ active: 'ativa', past_due: 'em atraso', suspended: 'suspensa' })[d.to] || d.to}`, d.reason || '');
+      case 'billing.invoice_paid': return E('dados', 'ok', `Fatura paga: ${money(Number(d.amount) || 0)}`, d.manual ? 'Baixa manual pela plataforma.' : 'Confirmado pelo Mercado Pago.');
+      case 'billing.invoice_created': return E('dados', '', `Fatura criada: ${money(Number(d.amount) || 0)}`, d.due ? 'Vencimento ' + d.due.split('-').reverse().join('/') : '');
+      case 'billing.subscribe_started': return E('dados', '', 'Iniciou a assinatura no cartão (Mercado Pago)', d.plan ? 'Plano ' + d.plan : '');
+      case 'billing.subscription_authorized': return E('dados', 'ok', 'Assinatura no cartão ativada');
+      case 'billing.subscription_status': return E('dados', 'warn', `Assinatura no cartão: ${d.status}`);
+      case 'billing.subscription_canceled': return E('dados', 'warn', 'Assinatura no cartão cancelada pela plataforma');
+      case 'billing.pix_issued': return E('dados', '', 'Gerou o link de PIX/boleto', d.sent ? 'Enviado por e-mail.' : '');
+      case 'billing.invoice_manual_paid': return E('dados', 'warn', 'Deu baixa manual em uma fatura', d.note || '');
+      case 'billing.invoice_canceled': return E('dados', 'warn', 'Cancelou uma fatura', d.reason || '');
+      case 'billing.method': return E('cadastros', '', `Forma de cobrança: ${METHOD[d.method] || d.method}`, [d.billingDay ? 'vencimento dia ' + d.billingDay : null, d.autoInvoice ? 'envio automático' : null].filter(Boolean).join(' · '));
+      case 'billing.credentials': return E('cadastros', 'warn', 'Alterou as credenciais do Mercado Pago');
+      case 'billing.webhook_rejected': return E('acesso', 'bad', 'Notificação de pagamento recusada', d.reason || '');
+      case 'billing.amount_mismatch': return E('dados', 'bad', 'Cobrança do cartão MENOR que a fatura (não foi dada baixa)', `Esperado ${money(Number(d.expected) || 0)}, recebido ${money(Number(d.received) || 0)}. Confira o valor da assinatura no Mercado Pago.`);
+      case 'billing.run_manual': return E('dados', '', 'Rodou a rotina de cobrança manualmente');
       case 'invite.accepted': return E('conta', 'ok', 'Aceitou o convite e criou a senha');
       case 'confirm.bad_password': return E('conta', 'warn', 'Senha errada ao confirmar uma ação sensível');
       case 'confirm.bad_code': return E('conta', 'warn', 'Código do 2FA errado ao confirmar uma ação sensível');

@@ -125,9 +125,9 @@ function setStatus(companyId, status, reason) {
   if (status === cur.status) return cur.status;
   if (['suspended', 'canceled'].includes(status) && (!reason || String(reason).trim().length < 5)) throw bad('Informe o motivo (mínimo 5 caracteres).');
   tx(() => {
-    run(`UPDATE companies SET status = ?, status_reason = ?, canceled_at = CASE WHEN ? = 'canceled' THEN ? ELSE NULL END, updated_at = ?,
+    run(`UPDATE companies SET status = ?, status_reason = ?, lock_kind = CASE WHEN ? = 'suspended' THEN 'manual' ELSE NULL END, canceled_at = CASE WHEN ? = 'canceled' THEN ? ELSE NULL END, updated_at = ?,
         trial_ends_at = CASE WHEN ? = 'trial' THEN COALESCE(trial_ends_at, ?) ELSE trial_ends_at END WHERE id = ?`,
-    status, reason ? String(reason).trim().slice(0, 300) : null, status, Date.now(), Date.now(), status, Date.now() + 14 * 86_400_000, companyId);
+    status, reason ? String(reason).trim().slice(0, 300) : null, status, status, Date.now(), Date.now(), status, Date.now() + 14 * 86_400_000, companyId);
     if (['suspended', 'canceled'].includes(status)) {
       run('DELETE FROM sessions WHERE user_id IN (SELECT id FROM users WHERE company_id = ?)', companyId);
       run('UPDATE sessions SET acting_company_id = NULL, acting_until = NULL, acting_reason = NULL WHERE acting_company_id = ?', companyId);
@@ -140,9 +140,10 @@ function setStatus(companyId, status, reason) {
 // Depois disso o CNPJ fica livre para um novo cadastro.
 const TENANT_TABLES = ['outbox', 'schedules', 'cases', 'responses', 'devices', 'user_branches', 'surveys', 'branches', 'media', 'company_settings', 'users'];
 function purgeCompany(companyId) {
-  const c = get('SELECT id, name, status, cnpj FROM companies WHERE id = ?', companyId);
+  const c = get('SELECT id, name, status, cnpj, mp_preapproval_id, mp_preapproval_status FROM companies WHERE id = ?', companyId);
   if (!c) throw new HttpError(404, 'Empresa não encontrada.');
   if (c.status !== 'canceled') throw new HttpError(409, 'Só é possível excluir definitivamente uma empresa cancelada.');
+  if (c.mp_preapproval_id && c.mp_preapproval_status !== 'cancelled') throw new HttpError(409, 'A assinatura no cartão desta empresa ainda está ativa no Mercado Pago. Cancele a assinatura antes de excluir.');
   const counts = {};
   tx(() => {
     run('DELETE FROM sessions WHERE user_id IN (SELECT id FROM users WHERE company_id = ?)', companyId);

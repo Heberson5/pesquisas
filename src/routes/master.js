@@ -67,10 +67,19 @@ router.put('/master/companies/:id', async (req, res) => {
 });
 
 // Situação: suspender e reativar com motivo; cancelar exige confirmar com senha (e código do 2FA, se ativo).
-router.post('/master/companies/:id/status', (req, res) => {
+router.post('/master/companies/:id/status', async (req, res) => {
   const cid = id(req.params.id);
   const status = String(req.body?.status || '');
-  if (status === 'canceled') confirmSensitive(req);
+  if (status === 'canceled') {
+    confirmSensitive(req);
+    // Cancelou a empresa: a assinatura no cartão é cancelada no Mercado Pago ANTES (senão o cartão seguiria sendo cobrado).
+    const c = get('SELECT mp_preapproval_id, mp_preapproval_status FROM companies WHERE id = ?', cid);
+    if (c?.mp_preapproval_id && c.mp_preapproval_status !== 'cancelled') {
+      await require('../mercadopago').updatePreapproval(c.mp_preapproval_id, { status: 'cancelled' });
+      run("UPDATE companies SET mp_preapproval_status = 'cancelled', updated_at = ? WHERE id = ?", Date.now(), cid);
+      pAudit(req, 'billing.subscription_canceled', { id: cid, preapprovalId: c.mp_preapproval_id, reason: 'empresa cancelada' }, cid);
+    }
+  }
   const before = admin.setStatus(cid, status, req.body?.reason);
   pAudit(req, 'company.status', { id: cid, from: before, to: status, reason: req.body?.reason || null }, cid);
   res.json({ ok: true, status, statusLabel: STATUS_LABEL[status] });
@@ -83,7 +92,9 @@ router.post('/master/companies/:id/trial', (req, res) => {
   const c = get('SELECT status, trial_ends_at FROM companies WHERE id = ?', cid);
   if (!c) throw new HttpError(404, 'Empresa não encontrada.');
   const until = Math.max(Date.now(), c.trial_ends_at || 0) + days * 86_400_000;
-  run("UPDATE companies SET trial_ends_at = ?, status = CASE WHEN status IN ('trial','suspended') THEN 'trial' ELSE status END, updated_at = ? WHERE id = ?", until, Date.now(), cid);
+  run(`UPDATE companies SET trial_ends_at = ?, status = CASE WHEN status IN ('trial','suspended') THEN 'trial' ELSE status END,
+      lock_kind = CASE WHEN status IN ('trial','suspended') THEN NULL ELSE lock_kind END, status_reason = CASE WHEN status IN ('trial','suspended') THEN NULL ELSE status_reason END,
+      updated_at = ? WHERE id = ?`, until, Date.now(), cid);
   pAudit(req, 'company.trial_extended', { id: cid, days, until }, cid);
   res.json({ ok: true, trialEndsAt: until });
 });
@@ -153,16 +164,111 @@ router.delete('/master/plans/:id', (req, res) => {
   res.json({ ok: true });
 });
 // Troca o plano de uma empresa (null = sem limites).
-router.post('/master/companies/:id/plan', (req, res) => {
+router.post('/master/companies/:id/plan', async (req, res) => {
   const cid = id(req.params.id);
-  const c = get('SELECT plan_id FROM companies WHERE id = ?', cid);
+  const c = get('SELECT plan_id, mp_preapproval_id, mp_preapproval_status FROM companies WHERE id = ?', cid);
   if (!c) throw new HttpError(404, 'Empresa não encontrada.');
   const planId = req.body?.planId === null ? null : id(req.body?.planId, 'plano');
-  const p = planId ? get('SELECT name FROM plans WHERE id = ?', planId) : null;
+  const p = planId ? get('SELECT name, price_cents FROM plans WHERE id = ?', planId) : null;
   if (planId && !p) throw bad('Plano inexistente.');
+  // Assinatura no cartão ativa: o valor cobrado acompanha o novo plano (se o Mercado Pago recusar, nada muda).
+  if (c.mp_preapproval_id && ['authorized', 'paused'].includes(c.mp_preapproval_status) && p?.price_cents > 0) {
+    await require('../mercadopago').updatePreapproval(c.mp_preapproval_id, { auto_recurring: { transaction_amount: p.price_cents / 100, currency_id: 'BRL' } });
+  }
   run('UPDATE companies SET plan_id = ?, updated_at = ? WHERE id = ?', planId, Date.now(), cid);
   pAudit(req, 'company.plan', { id: cid, from: c.plan_id, to: planId, plan: p?.name || 'sem limites' }, cid);
   res.json({ ok: true });
+});
+
+// ---------------------------------------------------------------- faturamento (Mercado Pago)
+const billing = require('../billing');
+const mp = require('../mercadopago');
+router.get('/master/billing', (req, res) => res.json(mp.publicView()));
+router.put('/master/billing', (req, res) => {
+  const b = req.body || {};
+  if (b.clear === true) confirmSensitive(req);
+  const view = mp.save({ accessToken: b.accessToken, webhookSecret: b.webhookSecret, clear: b.clear === true });
+  pAudit(req, 'billing.credentials', { token: b.accessToken ? 'alterado' : undefined, secret: b.webhookSecret ? 'alterada' : undefined, cleared: b.clear === true || undefined });
+  res.json(view);
+});
+router.post('/master/billing/test', rateLimiter({ windowMs: 60 * 60_000, max: 10, keyFn: (req) => 'mpt:' + req.user.id }), async (req, res) => {
+  const me = await mp.testConnection();
+  res.json({ ok: true, account: { id: me.id, nickname: me.nickname, email: me.email, site: me.site_id } });
+});
+
+// Todas as faturas (visão geral do Master), com filtro de situação.
+router.get('/master/invoices', (req, res) => {
+  const st = String(req.query.status || '');
+  const today = new Date().toISOString().slice(0, 10);
+  const where = st === 'overdue' ? "i.status = 'open' AND i.due_date < ?" : st === 'open' ? "i.status = 'open'" : st === 'paid' ? "i.status = 'paid'" : '1=1';
+  const rows = all(`SELECT i.*, c.name AS company FROM invoices i JOIN companies c ON c.id = i.company_id WHERE ${where}
+    ORDER BY i.due_date DESC, i.id DESC LIMIT 500 /* tenant-ok: visão geral do Master */`, ...(st === 'overdue' ? [today] : []));
+  res.json(rows);
+});
+router.get('/master/companies/:id/billing', (req, res) => res.json(billing.overview(id(req.params.id))));
+// Forma de cobrança: cartão (padrão, assinatura feita pelo cliente) ou PIX/boleto (gerado pelo Master, manual ou automático).
+router.post('/master/companies/:id/billing', (req, res) => {
+  const cid = id(req.params.id);
+  if (!get('SELECT 1 FROM companies WHERE id = ?', cid)) throw new HttpError(404, 'Empresa não encontrada.');
+  const b = req.body || {};
+  if (!['card', 'pix_boleto'].includes(b.method)) throw bad('Forma de cobrança inválida.');
+  const day = b.billingDay === null || b.billingDay === undefined || b.billingDay === '' ? null : int(b.billingDay, { field: 'dia do vencimento', min: 1, max: 28 });
+  if (b.autoInvoice !== undefined && typeof b.autoInvoice !== 'boolean') throw bad('Valor inválido para envio automático.');
+  run('UPDATE companies SET billing_method = ?, billing_day = ?, auto_invoice = ?, updated_at = ? WHERE id = ?', b.method, day, b.autoInvoice ? 1 : 0, Date.now(), cid);
+  pAudit(req, 'billing.method', { id: cid, method: b.method, billingDay: day, autoInvoice: !!b.autoInvoice }, cid);
+  res.json({ ok: true });
+});
+router.post('/master/companies/:id/invoices', (req, res) => {
+  const cid = id(req.params.id);
+  if (!get('SELECT 1 FROM companies WHERE id = ?', cid)) throw new HttpError(404, 'Empresa não encontrada.');
+  const b = req.body || {};
+  const plan = require('../plans').planOf(cid);
+  const amountCents = b.amountCents !== undefined ? int(b.amountCents, { field: 'valor (centavos)', min: 1, max: 100_000_000 }) : plan?.priceCents;
+  if (!amountCents) throw bad('Informe o valor (a empresa não tem plano pago).');
+  const description = str(b.description || `Assinatura ${plan?.name || ''}`.trim(), { field: 'descrição', min: 3, max: 200 });
+  const dueDate = String(b.dueDate || '');
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(dueDate) || Number.isNaN(Date.parse(dueDate))) throw bad('Vencimento inválido.');
+  const invId = billing.createInvoice(cid, { amountCents, description, dueDate, createdBy: req.user.id });
+  pAudit(req, 'billing.invoice_created', { invoiceId: invId, amount: amountCents, due: dueDate, manual: true }, cid);
+  res.status(201).json({ id: invId });
+});
+const invoiceOf = (iid) => { const i = get('SELECT * FROM invoices WHERE id = ? /* tenant-ok: tela do Master */', iid); if (!i) throw new HttpError(404, 'Fatura não encontrada.'); return i; };
+router.post('/master/invoices/:id/pix', async (req, res) => {
+  const inv = invoiceOf(id(req.params.id));
+  const r = await billing.issuePixBoleto(inv.id, { send: req.body?.send === true });
+  pAudit(req, 'billing.pix_issued', { invoiceId: inv.id, sent: req.body?.send === true }, inv.company_id);
+  res.json(r);
+});
+router.post('/master/invoices/:id/paid', (req, res) => {
+  const inv = invoiceOf(id(req.params.id));
+  const note = str(req.body?.note, { field: 'observação', min: 3, max: 200 });
+  billing.markPaid(inv.id, { by: req.user.id, method: 'manual', note });
+  pAudit(req, 'billing.invoice_manual_paid', { invoiceId: inv.id, note }, inv.company_id);
+  res.json({ ok: true });
+});
+router.post('/master/invoices/:id/cancel', (req, res) => {
+  const inv = invoiceOf(id(req.params.id));
+  if (inv.status !== 'open') throw new HttpError(409, 'Só é possível cancelar fatura em aberto.');
+  const reason = str(req.body?.reason, { field: 'motivo', min: 3, max: 200 });
+  run("UPDATE invoices SET status = 'canceled', notes = ?, updated_at = ? WHERE id = ? /* tenant-ok: tela do Master */", reason, Date.now(), inv.id);
+  billing.reevaluate(inv.company_id);
+  pAudit(req, 'billing.invoice_canceled', { invoiceId: inv.id, reason }, inv.company_id);
+  res.json({ ok: true });
+});
+router.post('/master/companies/:id/subscription/cancel', async (req, res) => {
+  const cid = id(req.params.id);
+  const c = get('SELECT mp_preapproval_id FROM companies WHERE id = ?', cid);
+  if (!c?.mp_preapproval_id) throw new HttpError(409, 'A empresa não tem assinatura no cartão.');
+  confirmSensitive(req);
+  await mp.updatePreapproval(c.mp_preapproval_id, { status: 'cancelled' });
+  run("UPDATE companies SET mp_preapproval_status = 'cancelled', updated_at = ? WHERE id = ?", Date.now(), cid);
+  pAudit(req, 'billing.subscription_canceled', { id: cid, preapprovalId: c.mp_preapproval_id }, cid);
+  res.json({ ok: true });
+});
+router.post('/master/billing/run', async (req, res) => {
+  const r = await billing.runBilling();
+  pAudit(req, 'billing.run_manual', { invoices: r.invoices, sent: r.sent });
+  res.json(r);
 });
 
 // ---------------------------------------------------------------- entrar / sair de uma empresa

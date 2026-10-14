@@ -305,3 +305,4 @@ label.f > .small { font-weight: 400; }
 .plan-card h3 { margin: 0 0 6px; display: flex; gap: 8px; align-items: center; }
 .plan-card.current { border-color: var(--good); }
 .plan-card ul { padding-left: 18px; margin: 8px 0 0; }
+.bad-banner { background: color-mix(in srgb, var(--bad) 12%, var(--surface)); }

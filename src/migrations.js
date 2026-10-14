@@ -183,10 +183,52 @@ function planos(db) {
     JSON.stringify({ pptx: true, whatsapp: true, webhook: true }), 3, now, now);
 }
 
+// ---------------------------------------------------------------- 4: faturamento (Mercado Pago)
+// Faturas por empresa, assinatura no cartão (preapproval do Mercado Pago), PIX/boleto gerado pelo Master e
+// registro de notificações recebidas (cada uma é processada uma única vez).
+function faturamento(db) {
+  for (const ddl of ["billing_method TEXT NOT NULL DEFAULT 'card'", 'auto_invoice INTEGER NOT NULL DEFAULT 0', 'billing_day INTEGER',
+    'mp_preapproval_id TEXT', 'mp_preapproval_status TEXT', 'lock_kind TEXT']) addColumn(db, 'companies', ddl);
+  db.exec(`CREATE TABLE invoices (
+  id INTEGER PRIMARY KEY,
+  company_id INTEGER NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
+  period TEXT,
+  description TEXT NOT NULL,
+  amount_cents INTEGER NOT NULL CHECK (amount_cents > 0),
+  due_date TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open','paid','canceled')),
+  method TEXT,
+  checkout_url TEXT,
+  mp_preference_id TEXT,
+  mp_payment_id TEXT,
+  paid_at INTEGER,
+  paid_amount_cents INTEGER,
+  sent_at INTEGER,
+  notes TEXT,
+  created_by INTEGER,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+CREATE UNIQUE INDEX idx_invoices_period ON invoices(company_id, period) WHERE period IS NOT NULL AND status <> 'canceled';
+CREATE INDEX idx_invoices_company ON invoices(company_id, status, due_date);
+CREATE UNIQUE INDEX idx_invoices_mp_payment ON invoices(mp_payment_id) WHERE mp_payment_id IS NOT NULL;
+CREATE UNIQUE INDEX idx_companies_preapproval ON companies(mp_preapproval_id) WHERE mp_preapproval_id IS NOT NULL;
+CREATE TABLE billing_events (
+  id INTEGER PRIMARY KEY,
+  event_key TEXT NOT NULL UNIQUE,
+  topic TEXT NOT NULL,
+  resource_id TEXT NOT NULL,
+  company_id INTEGER,
+  result TEXT,
+  received_at INTEGER NOT NULL
+);`);
+}
+
 const MIGRATIONS = [
   { version: 1, name: 'multiempresa', up: multiempresa },
   { version: 2, name: 'cadastro_empresa', up: cadastroEmpresa },
   { version: 3, name: 'planos', up: planos },
+  { version: 4, name: 'faturamento', up: faturamento },
 ];
 
 function runMigrations(db) {

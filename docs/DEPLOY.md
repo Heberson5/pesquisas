@@ -84,3 +84,11 @@ O banco é migrado automaticamente na inicialização. Faça um backup manual an
 ## Logs e monitoramento
 `docker compose logs -f app` · verificação de saúde: `https://pesquisa.sauberlich.com.br/healthz`
 (sugestão: monitore com UptimeRobot/Better Stack, gratuito).
+
+
+## Mercado Pago (faturamento das empresas)
+1. No Mercado Pago (developers → Suas integrações → sua aplicação → Credenciais de produção), copie o **Access Token** (`APP_USR-…`).
+2. Em **Webhooks**, cadastre `https://pesquisa.sauberlich.com.br/api/webhooks/mercadopago`, marque **Pagamentos** e **Planos e assinaturas** e copie a **Assinatura secreta**.
+3. No painel, como Master: **Configurações gerais → Faturamento (Mercado Pago)**, cole o token e a assinatura secreta e clique em **Testar conexão**.
+4. Para testar antes de cobrar de verdade, use as credenciais de teste (`TEST-…`) e os cartões de teste do Mercado Pago.
+O servidor precisa acessar `api.mercadopago.com`, `brasilapi.com.br` e `receitaws.com.br` (consulta do CNPJ).

@@ -21,6 +21,7 @@ every('retencao-lgpd', 6 * 3_600_000, () => require('./retention').applyRetentio
 every('relatorio-semanal', 10 * 60_000, () => require('./scheduled').sendWeeklyReport());
 every('tablets-sem-sinal', 5 * 60_000, () => require('./scheduled').checkOfflineTablets());
 every('capacidade-servidor', 60 * 60_000, () => require('./health').checkCapacity());
+every('faturamento', 60 * 60_000, () => require('./billing').runBilling());
 
 async function tick() {
   const now = Date.now();
