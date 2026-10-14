@@ -46,6 +46,9 @@ router.post('/settings/weekly-report/send-now', admin, testLimiter, async (req, 
 });
 
 router.put('/settings', admin, (req, res) => {
+  const { assertFeature } = require('../plans');
+  if (req.body?.alerts?.webhookUrl) assertFeature(req.user.companyId, 'webhook');
+  if (req.body?.alerts?.whatsappTemplate) assertFeature(req.user.companyId, 'whatsapp');
   const saved = saveSettings(req.user.companyId, req.body);
   auditReq(req, 'settings.update', { companyName: saved.companyName });
   res.json(saved);
@@ -81,6 +84,12 @@ router.post('/settings/test-whatsapp', admin, testLimiter, async (req, res) => {
     if (e instanceof HttpError) throw e;
     res.json({ ok: false, error: e.message });
   }
+});
+
+// ---------------------------------------------------------------- plano e uso (Administrador)
+router.get('/plan', admin, (req, res) => {
+  const { planView, listPlans } = require('../plans');
+  res.json({ ...planView(req.user.companyId), available: listPlans({ onlyActive: true }) });
 });
 
 // ---------------------------------------------------------------- auditoria da empresa

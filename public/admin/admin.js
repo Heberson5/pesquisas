@@ -286,6 +286,7 @@
   // [rota, rótulo, página, permissão exigida ('master' = só o Master), grupo]
   const PAGES = [
     ['empresas', 'Empresas', pageCompanies, 'master', 'Plataforma'],
+    ['planos', 'Planos', pagePlans, 'master', 'Plataforma'],
     ['plataforma', 'Configurações gerais', pagePlatform, 'master', 'Plataforma'],
     ['saude', 'Saúde da plataforma', pageHealth, 'master', 'Plataforma'],
     ['auditoria-plataforma', 'Auditoria da plataforma', pagePlatformAudit, 'master', 'Plataforma'],
@@ -296,6 +297,7 @@
     ['filiais', 'Unidades', pageBranches, null, 'Coleta'],
     ['dispositivos', 'Tablets', pageDevices, null, 'Coleta'],
     ['usuarios', 'Usuários', pageUsers, () => me.can('users.manage') || me.can('users.gestores'), 'Administração'],
+    ['plano', 'Plano e uso', pageMyPlan, 'settings.manage', 'Administração'],
     ['configuracoes', 'Configurações', pageSettings, 'settings.manage', 'Administração'],
     ['auditoria', 'Auditoria', pageAudit, 'audit.view', 'Administração'],
     ['conta', 'Minha conta', pageAccount, () => true, 'Administração'],
@@ -1178,8 +1180,9 @@
 
   async function pageCompanies(param) {
     if (param) return pageCompany(Number(param));
-    const list = await api('/master/companies');
+    const [list, planList] = await Promise.all([api('/master/companies'), api('/master/plans')]);
     const create = () => {
+      const plan = h('select', {}, h('option', { value: '' }, 'Sem limites'), planList.plans.filter((p) => p.active).map((p) => h('option', { value: String(p.id) }, `${p.name} — ${money(p.priceCents)}/mês`)));
       const form = companyForm({}, { isNew: true });
       const adminName = h('input', { maxlength: '100' }); const adminEmail = h('input', { type: 'email' });
       const status = h('select', {}, h('option', { value: 'trial' }, 'Em teste grátis'), h('option', { value: 'active' }, 'Ativa (já contratou)'));
@@ -1187,10 +1190,10 @@
       modal('Nova empresa', h('div', {}, form.el,
         h('h2', { class: 'mt' }, 'Primeiro administrador (recebe um convite por e-mail para criar a senha)'),
         h('div', { class: 'form-grid' }, h('label', { class: 'f' }, 'Nome', adminName), h('label', { class: 'f' }, 'E-mail', adminEmail),
-          h('label', { class: 'f' }, 'Situação inicial', status), h('label', { class: 'f' }, 'Dias de teste grátis', days))),
+          h('label', { class: 'f' }, 'Situação inicial', status), h('label', { class: 'f' }, 'Dias de teste grátis', days), h('label', { class: 'f' }, 'Plano', plan))),
       [{ label: 'Cadastrar empresa', onClick: async (close) => {
         try {
-          const r = await api('/master/companies', { method: 'POST', body: { ...form.value(), status: status.value, trialDays: Number(days.value),
+          const r = await api('/master/companies', { method: 'POST', body: { ...form.value(), status: status.value, trialDays: Number(days.value), planId: plan.value ? Number(plan.value) : null,
             admin: adminEmail.value ? { name: adminName.value, email: adminEmail.value } : null } });
           close(); toast(r.manual ? 'Empresa cadastrada (dados não conferidos na Receita).' : 'Empresa cadastrada.' + (r.userId ? ' Convite enviado ao administrador.' : ''));
           location.hash = '#/empresas/' + r.id;
@@ -1207,10 +1210,11 @@
         h('td', {}, h('a', { href: '#/empresas/' + c.id }, h('b', {}, c.name)), h('div', { class: 'small muted' }, c.cnpj ? 'CNPJ ' + fmtCnpj(c.cnpj) : c.slug)),
         h('td', {}, h('span', { class: 'badge ' + (STATUS_CLS[c.status] || '') }, c.statusLabel), c.status === 'trial' && c.trial_ends_at ? h('div', { class: 'small muted' }, 'até ' + fmtDay(c.trial_ends_at)) : null,
           c.origin === 'self' ? h('div', { class: 'small muted' }, 'autocadastro') : null),
+        h('td', {}, c.plan_name || h('span', { class: 'muted small' }, 'sem limites')),
         h('td', {}, c.branches), h('td', {}, c.devices), h('td', {}, c.users), h('td', {}, c.responses30d),
         h('td', {}, h('div', { class: 'row' }, h('a', { class: 'btn secondary sm', href: '#/empresas/' + c.id }, 'Ficha'),
           me.company?.id === c.id ? h('span', { class: 'badge ok' }, 'Você está aqui') : c.status !== 'canceled' ? h('button', { class: 'btn secondary sm', onclick: () => enterCompany(c) }, 'Entrar') : null))))
-        : [h('tr', {}, h('td', { colspan: '7', class: 'empty' }, list.length ? 'Nenhuma empresa com esses filtros.' : 'Nenhuma empresa cadastrada ainda.'))]));
+        : [h('tr', {}, h('td', { colspan: '8', class: 'empty' }, list.length ? 'Nenhuma empresa com esses filtros.' : 'Nenhuma empresa cadastrada ainda.'))]));
     };
     search.addEventListener('input', draw); stSel.addEventListener('change', draw); draw();
     const count = (st) => list.filter((c) => c.status === st).length;
@@ -1221,7 +1225,7 @@
         .map(([l, n, cls]) => h('div', { class: 'card kpi-mini' }, h('div', { class: 'small muted' }, l), h('div', { class: 'kpi-num ' + cls }, String(n))))),
       h('div', { class: 'card filters' }, h('label', { class: 'f' }, 'Buscar', search), h('label', { class: 'f' }, 'Situação', stSel)),
       h('div', { class: 'card table-wrap' }, h('table', {},
-        h('thead', {}, h('tr', {}, h('th', {}, 'Empresa'), h('th', {}, 'Situação'), h('th', {}, 'Unidades'), h('th', {}, 'Tablets'), h('th', {}, 'Usuários'), h('th', {}, 'Respostas (30 dias)'), h('th', {}))),
+        h('thead', {}, h('tr', {}, h('th', {}, 'Empresa'), h('th', {}, 'Situação'), h('th', {}, 'Plano'), h('th', {}, 'Unidades'), h('th', {}, 'Tablets'), h('th', {}, 'Usuários'), h('th', {}, 'Respostas (30 dias)'), h('th', {}))),
         body)));
   }
 
@@ -1234,7 +1238,9 @@
   };
 
   async function pageCompany(cid) {
-    const c = await api('/master/companies/' + cid);
+    const [c, planList] = await Promise.all([api('/master/companies/' + cid), api('/master/plans')]);
+    const planSel = h('select', {}, h('option', { value: '' }, 'Sem limites'), planList.plans.map((p) => h('option', { value: String(p.id) }, `${p.name} — ${money(p.priceCents)}/mês${p.active ? '' : ' (desativado)'}`)));
+    planSel.value = c.plan_id ? String(c.plan_id) : '';
     const form = companyForm(c);
     const status = (to, title, text, { needsReason = true, sensitive = false } = {}) => {
       const reason = h('input', { maxlength: '300', placeholder: 'Motivo (fica na auditoria)' });
@@ -1283,6 +1289,9 @@
           ` · endereço curto: ${c.slug}`)),
       h('div', { class: 'grid c4' }, [['Unidades', c.counts.branches], ['Tablets ativos', c.counts.devices], ['Usuários ativos', c.counts.users], ['Respostas', c.counts.responses]]
         .map(([l, n]) => h('div', { class: 'card kpi-mini' }, h('div', { class: 'small muted' }, l), h('div', { class: 'kpi-num' }, String(n))))),
+      h('div', { class: 'card' }, h('div', { class: 'topbar' }, h('h2', {}, 'Plano e uso'), h('div', { class: 'row' }, planSel, h('button', { class: 'btn secondary sm', onclick: async () => {
+        try { await api(`/master/companies/${cid}/plan`, { method: 'POST', body: { planId: planSel.value ? Number(planSel.value) : null } }); toast('Plano alterado.'); route(); } catch (ex) { toast(ex.message, true); }
+      } }, 'Trocar plano'))), usageTable(c.planUsage)),
       h('div', { class: 'card' }, h('div', { class: 'topbar' }, h('h2', {}, 'Administradores'), h('button', { class: 'btn secondary sm', onclick: invite }, icon('plus', 14), 'Convidar administrador')),
         c.admins.length ? h('div', { class: 'table-wrap' }, h('table', {}, h('thead', {}, h('tr', {}, ['Nome', 'E-mail', '2FA', 'Situação', ''].map((t) => h('th', {}, t)))),
           h('tbody', {}, c.admins.map((u) => h('tr', {}, h('td', {}, u.name), h('td', {}, u.email), h('td', {}, u.totp_enabled ? h('span', { class: 'badge ok' }, 'Ativo') : h('span', { class: 'badge warn' }, 'Não')),
@@ -1297,10 +1306,81 @@
         } }, 'Salvar cadastro'))));
   }
 
+  // ------------------------------------------------------------ planos
+  const money = (cents) => (cents / 100).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' });
+  // Tabela de uso x limite (tela do administrador e ficha da empresa).
+  function usageTable(v) {
+    return h('div', {},
+      h('div', { class: 'table-wrap' }, h('table', {}, h('thead', {}, h('tr', {}, ['Item', 'Em uso', 'Limite do plano', ''].map((t) => h('th', {}, t)))),
+        h('tbody', {}, v.rows.map((x) => h('tr', {}, h('td', {}, x.label), h('td', {}, x.used.toLocaleString('pt-BR')),
+          h('td', {}, x.max === null ? h('span', { class: 'muted' }, 'sem limite') : x.max.toLocaleString('pt-BR')),
+          h('td', {}, x.pct === null ? null : h('div', { class: 'meter' }, (() => { const bar = h('span', { class: 'meter-fill ' + (x.pct >= 100 ? 'crit' : x.pct >= 80 ? 'warn' : 'ok') }); bar.style.width = Math.min(100, x.pct) + '%'; return bar; })()))))))),
+      h('p', { class: 'small' }, 'Recursos: ', v.features.map((f) => h('span', { class: 'badge ' + (f.enabled ? 'ok' : 'off') }, (f.enabled ? '✓ ' : '✗ ') + f.label)).flatMap((x) => [x, ' '])),
+      h('p', { class: 'small muted' }, 'Respostas de clientes nunca são recusadas por limite: ao chegar a 80% e a 100% do mês, os administradores recebem um aviso.'));
+  }
+
+  async function pageMyPlan() {
+    const v = await api('/plan');
+    return h('div', {}, pageHead('Plano e uso', v.plan ? `Plano ${v.plan.name}${v.plan.priceCents ? ' · ' + money(v.plan.priceCents) + ' por mês' : ''}` : 'Sua empresa não tem limites de uso'),
+      h('div', { class: 'card' }, h('h2', {}, 'Uso atual'), usageTable(v)),
+      v.available.length ? h('div', { class: 'card' }, h('h2', {}, 'Planos disponíveis'),
+        h('div', { class: 'grid c3' }, v.available.map((p) => h('div', { class: 'card plan-card' + (v.plan?.id === p.id ? ' current' : '') },
+          h('h3', {}, p.name, v.plan?.id === p.id ? h('span', { class: 'badge ok' }, ' seu plano') : null), h('div', { class: 'kpi-num' }, money(p.priceCents), h('span', { class: 'small muted' }, ' /mês')),
+          p.description ? h('p', { class: 'small muted' }, p.description) : null,
+          h('ul', { class: 'small' }, Object.entries({ branches: ['unidade', 'unidades'], devices: ['tablet', 'tablets'], users: ['usuário', 'usuários'], surveys: ['pesquisa ativa', 'pesquisas ativas'], responsesMonth: ['resposta/mês', 'respostas/mês'] })
+            .map(([k, [one, many]]) => h('li', {}, p.limits[k] === null || p.limits[k] === undefined ? `${many}: sem limite` : `${p.limits[k].toLocaleString('pt-BR')} ${p.limits[k] === 1 ? one : many}`)),
+            p.features.pptx ? h('li', {}, 'Relatório em PowerPoint') : null, p.features.whatsapp ? h('li', {}, 'Alertas por WhatsApp') : null, p.features.webhook ? h('li', {}, 'Integração por webhook') : null)))),
+        h('p', { class: 'small muted' }, 'Para trocar de plano, fale com o suporte da plataforma.')) : null);
+  }
+
+  async function pagePlans() {
+    const { plans, limits, features } = await api('/master/plans');
+    const edit = (p = { limits: {}, features: { pptx: true }, active: true, priceCents: 0 }) => {
+      const name = h('input', { value: p.name || '', maxlength: '40' }); const desc = h('input', { value: p.description || '', maxlength: '200' });
+      const price = h('input', { type: 'number', min: '0', step: '0.01', value: (p.priceCents / 100).toFixed(2) });
+      const pos = h('input', { type: 'number', min: '0', max: '1000', value: p.position ?? 0 });
+      const active = h('input', { type: 'checkbox', checked: p.active !== false });
+      const lim = Object.fromEntries(Object.keys(limits).map((k) => [k, h('input', { type: 'number', min: '0', value: p.limits[k] ?? '', placeholder: 'sem limite' })]));
+      const feat = Object.fromEntries(Object.keys(features).map((k) => [k, h('input', { type: 'checkbox', checked: !!p.features[k] })]));
+      modal(p.id ? 'Editar plano' : 'Novo plano', h('div', {},
+        h('div', { class: 'form-grid' }, h('label', { class: 'f' }, 'Nome', name), h('label', { class: 'f' }, 'Preço mensal (R$)', price), h('label', { class: 'f' }, 'Descrição', desc),
+          h('label', { class: 'f' }, 'Ordem na lista', pos), h('label', { class: 'chk' }, active, 'Disponível para novas contratações')),
+        h('h2', { class: 'mt' }, 'Limites (em branco = sem limite)'),
+        h('div', { class: 'form-grid' }, Object.entries(limits).map(([k, l]) => h('label', { class: 'f' }, l, lim[k]))),
+        h('h2', { class: 'mt' }, 'Recursos'), Object.entries(features).map(([k, l]) => h('label', { class: 'chk' }, feat[k], l)),
+        p.id && p.companies ? h('p', { class: 'small muted' }, `${p.companies} empresa(s) neste plano: a mudança vale para elas na hora.`) : null),
+      [{ label: 'Salvar', onClick: async (close) => {
+        try {
+          const body = { name: name.value, description: desc.value, priceCents: Math.round(Number(price.value) * 100), position: Number(pos.value), active: active.checked,
+            limits: Object.fromEntries(Object.entries(lim).map(([k, el]) => [k, el.value === '' ? null : Number(el.value)])),
+            features: Object.fromEntries(Object.entries(feat).map(([k, el]) => [k, el.checked])) };
+          await api(p.id ? '/master/plans/' + p.id : '/master/plans', { method: p.id ? 'PUT' : 'POST', body }); close(); toast('Plano salvo.'); route();
+        } catch (ex) { toast(ex.message, true); }
+      } }]);
+    };
+    const lim = (v) => (v === null || v === undefined ? '∞' : v.toLocaleString('pt-BR'));
+    return h('div', {}, pageHead('Planos', 'Preço, limites e recursos de cada plano. Empresa sem plano não tem limites.', h('button', { class: 'btn', onclick: () => edit() }, icon('plus', 18), 'Novo plano')),
+      h('div', { class: 'card table-wrap' }, h('table', {},
+        h('thead', {}, h('tr', {}, ['Plano', 'Preço/mês', 'Unidades', 'Tablets', 'Usuários', 'Pesquisas', 'Respostas/mês', 'Recursos', 'Empresas', ''].map((t) => h('th', {}, t)))),
+        h('tbody', {}, plans.map((p) => h('tr', {},
+          h('td', {}, h('b', {}, p.name), p.active ? null : h('span', { class: 'badge off' }, 'desativado'), p.description ? h('div', { class: 'small muted' }, p.description) : null),
+          h('td', {}, money(p.priceCents)), ...['branches', 'devices', 'users', 'surveys', 'responsesMonth'].map((k) => h('td', {}, lim(p.limits[k]))),
+          h('td', { class: 'small' }, Object.entries(features).filter(([k]) => p.features[k]).map(([, l]) => l).join(', ') || '—'),
+          h('td', {}, p.companies),
+          h('td', {}, h('div', { class: 'row' }, h('button', { class: 'btn secondary sm', onclick: () => edit(p) }, 'Editar'),
+            p.companies ? null : h('button', { class: 'btn danger sm', onclick: async () => {
+              if (!confirm(`Excluir o plano ${p.name}?`)) return;
+              try { await api('/master/plans/' + p.id, { method: 'DELETE' }); route(); } catch (ex) { toast(ex.message, true); }
+            } }, 'Excluir')))))))));
+  }
+
   // ------------------------------------------------------------ Master: configurações gerais, saúde e auditoria da plataforma
   async function pagePlatform() {
-    const p = await api('/master/platform');
+    const [p, planList] = await Promise.all([api('/master/platform'), api('/master/plans')]);
     const st = structuredClone(p);
+    const signupPlan = h('select', { onchange: (e) => { st.signup.planId = e.target.value ? Number(e.target.value) : null; } }, h('option', { value: '' }, 'Sem limites'),
+      planList.plans.filter((x) => x.active).map((x) => h('option', { value: String(x.id) }, x.name)));
+    signupPlan.value = st.signup.planId ? String(st.signup.planId) : '';
     const chk = (obj, k, label, hint) => h('label', { class: 'chk' }, h('input', { type: 'checkbox', checked: obj[k], onchange: (e) => { obj[k] = e.target.checked; } }), h('span', {}, label, hint ? h('div', { class: 'small muted' }, hint) : null));
     const num = (obj, k, min, max) => h('input', { type: 'number', min: String(min), max: String(max), value: obj[k], oninput: (e) => { obj[k] = Number(e.target.value); } });
     const txt = (obj, k, extra = {}) => h('input', { value: obj[k] ?? '', oninput: (e) => { obj[k] = e.target.value; }, ...extra });
@@ -1322,7 +1402,7 @@
             h('label', { class: 'f' }, 'Cor principal', txt(st.branding, 'primaryColor', { type: 'color' })), h('label', { class: 'f' }, 'Cor de destaque', txt(st.branding, 'accentColor', { type: 'color' })))),
         h('div', { class: 'card' }, h('h2', {}, 'Cadastro de empresas pelo site'),
           chk(st.signup, 'enabled', 'Permitir que a própria empresa se cadastre', 'Aparece o link "Cadastrar minha empresa" na tela de login. O CNPJ precisa estar ATIVO na Receita.'),
-          h('label', { class: 'f' }, 'Dias de teste grátis', num(st.signup, 'trialDays', 1, 90))),
+          h('label', { class: 'f' }, 'Dias de teste grátis', num(st.signup, 'trialDays', 1, 90)), h('label', { class: 'f' }, 'Plano das empresas que se cadastram', signupPlan)),
         h('div', { class: 'card' }, h('h2', {}, 'Segurança'),
           chk(st.security, 'masterMfa', 'Exigir verificação em duas etapas (2FA) do Master', 'Recomendado: o Master enxerga todas as empresas.'),
           chk(st.companyDefaults, 'requireAdminMfa', 'Exigir 2FA dos administradores (padrão das empresas)', 'Cada empresa pode mudar nas configurações dela.')),
@@ -1766,6 +1846,10 @@
       case 'company.self_signup': return E('cadastros', 'ok', `Empresa cadastrada pelo site: ${d.name || ''}`, d.cnpj ? 'CNPJ ' + fmtCnpj(d.cnpj) : '');
       case 'platform.settings': return E('cadastros', '', 'Alterou as configurações gerais da plataforma', (d.changed || []).join(', '));
       case 'platform.delivery': return E('cadastros', '', 'Alterou o e-mail/WhatsApp padrão da plataforma');
+      case 'plan.create': return E('cadastros', '', `Criou o plano "${d.name || ''}"`);
+      case 'plan.update': return E('cadastros', '', `Alterou o plano "${d.name || ''}"`, d.priceCents !== undefined ? 'Preço: ' + money(Number(d.priceCents) || 0) : '');
+      case 'plan.delete': return E('cadastros', 'warn', `Excluiu o plano "${d.name || ''}"`);
+      case 'company.plan': return E('cadastros', '', `Trocou o plano da empresa para: ${d.plan || '—'}`);
       case 'invite.accepted': return E('conta', 'ok', 'Aceitou o convite e criou a senha');
       case 'confirm.bad_password': return E('conta', 'warn', 'Senha errada ao confirmar uma ação sensível');
       case 'confirm.bad_code': return E('conta', 'warn', 'Código do 2FA errado ao confirmar uma ação sensível');

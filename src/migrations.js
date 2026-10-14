@@ -157,9 +157,36 @@ function cadastroEmpresa(db) {
   addColumn(db, 'password_resets', "kind TEXT NOT NULL DEFAULT 'reset'");
 }
 
+// ---------------------------------------------------------------- 3: planos e limites
+// Plano = preço mensal + limites + recursos. Empresa sem plano (plan_id nulo) não tem limites (ex.: a empresa nº 1 migrada).
+function planos(db) {
+  db.exec(`CREATE TABLE plans (
+  id INTEGER PRIMARY KEY,
+  name TEXT NOT NULL UNIQUE COLLATE NOCASE,
+  description TEXT,
+  price_cents INTEGER NOT NULL DEFAULT 0 CHECK (price_cents >= 0),
+  limits_json TEXT NOT NULL DEFAULT '{}',
+  features_json TEXT NOT NULL DEFAULT '{}',
+  active INTEGER NOT NULL DEFAULT 1,
+  position INTEGER NOT NULL DEFAULT 0,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+)`);
+  const now = Date.now();
+  const add = db.prepare('INSERT INTO plans (name, description, price_cents, limits_json, features_json, position, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?)');
+  // Planos iniciais (o Master ajusta nomes, preços e limites no painel).
+  add.run('Essencial', 'Para uma loja ou clínica', 14900, JSON.stringify({ branches: 1, devices: 2, users: 3, surveys: 3, responsesMonth: 2000 }),
+    JSON.stringify({ pptx: true, whatsapp: false, webhook: false }), 1, now, now);
+  add.run('Profissional', 'Para pequenas redes', 34900, JSON.stringify({ branches: 5, devices: 10, users: 15, surveys: 10, responsesMonth: 10000 }),
+    JSON.stringify({ pptx: true, whatsapp: true, webhook: false }), 2, now, now);
+  add.run('Rede', 'Para redes com muitas unidades', 79900, JSON.stringify({ branches: 30, devices: 60, users: 80, surveys: 30, responsesMonth: 60000 }),
+    JSON.stringify({ pptx: true, whatsapp: true, webhook: true }), 3, now, now);
+}
+
 const MIGRATIONS = [
   { version: 1, name: 'multiempresa', up: multiempresa },
   { version: 2, name: 'cadastro_empresa', up: cadastroEmpresa },
+  { version: 3, name: 'planos', up: planos },
 ];
 
 function runMigrations(db) {

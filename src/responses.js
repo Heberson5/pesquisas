@@ -175,7 +175,10 @@ function saveResponse({ branch, deviceId = null, deviceLabel = null, channel, bo
     }
     return { created: true, id: Number(r.lastInsertRowid) };
   });
-  if (result.created) alerts.onResponse(result.id);
+  if (result.created) {
+    alerts.onResponse(result.id);
+    try { require('./plans').checkResponseQuota(branch.company_id); } catch (e) { console.error('[cota]', e.message); }
+  }
   return result;
 }
 

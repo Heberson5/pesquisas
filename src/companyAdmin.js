@@ -75,7 +75,7 @@ function saveDetails(companyId, c, receita) {
 }
 
 // Cria a empresa e, se informado, o primeiro Administrador (com convite por e-mail ou senha definida no autocadastro).
-async function registerCompany(input, { origin = 'master', status = 'trial', trialDays = 14, admin = null, invitedBy = null, allowManual = true } = {}) {
+async function registerCompany(input, { origin = 'master', status = 'trial', trialDays = 14, planId = null, admin = null, invitedBy = null, allowManual = true } = {}) {
   const c = companyInput(input);
   const receita = await checkCnpj(c.cnpj, { allowManual });
   // O que não foi digitado vem da Receita (razão social, nome fantasia, endereço, telefone, e-mail).
@@ -93,7 +93,7 @@ async function registerCompany(input, { origin = 'master', status = 'trial', tri
     const id = createCompany({ name: c.name, legalName: c.legalName, cnpj: c.cnpj, status,
       timezone: c.timezone, billingEmail: c.billingEmail, trialEndsAt: status === 'trial' ? Date.now() + trialDays * 86_400_000 : null });
     saveDetails(id, c, receita);
-    run('UPDATE companies SET origin = ? WHERE id = ?', origin, id);
+    run('UPDATE companies SET origin = ?, plan_id = ? WHERE id = ?', origin, planId, id);
     run("INSERT INTO company_settings (company_id, key, value) VALUES (?, 'companyName', ?)", id, JSON.stringify(c.name));
     let userId = null;
     if (adminUser) {
@@ -170,8 +170,9 @@ function companyDetails(companyId) {
   if (!c) throw new HttpError(404, 'Empresa não encontrada.');
   const { key_salt: _salt, address_json: addr, ...rest } = c;
   let address = null; try { address = addr ? JSON.parse(addr) : null; } catch { address = null; }
+  const { planView } = require('./plans');
   return {
-    ...rest, address, statusLabel: STATUS_LABEL[c.status],
+    ...rest, address, statusLabel: STATUS_LABEL[c.status], planUsage: planView(companyId),
     admins: all("SELECT id, name, email, active, totp_enabled, created_at FROM users WHERE company_id = ? AND role = 'admin' ORDER BY name", companyId),
     counts: get(`SELECT (SELECT COUNT(*) FROM branches WHERE company_id = ?) AS branches, (SELECT COUNT(*) FROM devices WHERE company_id = ? AND active = 1) AS devices,
       (SELECT COUNT(*) FROM users WHERE company_id = ? AND active = 1) AS users, (SELECT COUNT(*) FROM responses WHERE company_id = ?) AS responses,

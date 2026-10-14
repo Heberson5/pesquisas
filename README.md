@@ -4,6 +4,7 @@ Plataforma de pesquisa de satisfação para **tablets em modo quiosque** e **QR 
 
 - **Multiempresa:** cada empresa enxerga só os próprios dados (unidades, pesquisas, respostas, usuários, configurações, auditoria). Contatos de clientes são criptografados com uma **chave própria de cada empresa**.
 - **Painel Master:** cadastro de empresas com consulta automática do CNPJ (BrasilAPI, com ReceitaWS de reserva; só CNPJ **ativo** e sem duplicidade), convite do administrador por e-mail, suspender/reativar/cancelar (com motivo; cancelar exige senha + 2FA), prorrogar teste, exclusão definitiva (apaga dados e chave), configurações gerais (marca, autocadastro, 2FA, e-mail/WhatsApp padrão), **saúde e capacidade do servidor** com aviso por e-mail a 70%/90% e auditoria da plataforma.
+- **Planos e limites:** o Master define preço, limites (unidades, tablets, usuários, pesquisas, respostas/mês) e recursos (PowerPoint, WhatsApp, webhook). Cadastros além do limite são recusados com explicação; **respostas de clientes nunca são recusadas** — a 80% e 100% do mês o administrador e o Master recebem aviso. O administrador vê o uso em "Plano e uso".
 - **Autocadastro** (desligado por padrão): a empresa se cadastra pelo site e começa o teste grátis.
 - **Perfis:** **Master** (dono da plataforma: vê a lista de empresas e entra em uma delas por até 2 h, com motivo registrado na auditoria) → **Administrador** (tudo dentro da própria empresa, inclusive excluir respostas) → **Gestor** (as unidades dele; o Administrador pode liberar permissões extras: criar unidades, cadastrar gestores, LGPD, auditoria).
 
@@ -25,7 +26,7 @@ npm run create-master  -- voce@seudominio.com.br "Seu Nome"          # dono da p
 npm run create-company -- "Nome da Empresa" --cnpj 00000000000000    # primeira empresa
 npm run create-admin   -- admin@empresa.com.br "Nome" --empresa nome-da-empresa
 npm start          # http://127.0.0.1:3000/admin
-npm test           # 127 testes (segurança, isolamento entre empresas, migração)
+npm test           # 131 testes (segurança, isolamento entre empresas, migração)
 npm run seed:demo  # demonstração: Master + 2 empresas (nunca em produção)
 ```
 

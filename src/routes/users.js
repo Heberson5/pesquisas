@@ -12,6 +12,7 @@ const { HttpError, bad, str, id, email } = require('../validate');
 const { resetUserMfa } = require('./auth');
 const { scope } = require('../scope');
 const { sendInvite } = require('../invites');
+const { assertLimit } = require('../plans');
 const { randomToken } = require('../security');
 
 const router = express.Router();
@@ -78,6 +79,7 @@ function setUserBranches(userId, branches) {
 router.post('/users', (req, res) => {
   const u = userInput(req, true);
   if (get('SELECT 1 FROM users WHERE email = ? /* tenant-ok: e-mail é único na plataforma */', u.email)) throw new HttpError(409, 'Este e-mail já está em uso.');
+  if (u.active) assertLimit(req.user.companyId, 'users');
   const newId = tx(() => {
     const r = run('INSERT INTO users (company_id, name, email, password_hash, role, active, permissions, created_at) VALUES (?,?,?,?,?,?,?,?)',
       req.user.companyId, u.name, u.email, hashPassword(u.password || randomToken(24) + 'a1'), u.role, u.active, u.grants && u.grants.length ? JSON.stringify(u.grants) : null, Date.now());
@@ -96,6 +98,7 @@ router.put('/users/:id', (req, res) => {
   const u = userInput(req, false);
   if (uid === req.user.id && (u.role !== existing.role || !u.active)) throw bad('Você não pode alterar o seu próprio perfil de acesso.');
   if (get('SELECT 1 FROM users WHERE email = ? AND id <> ? /* tenant-ok: e-mail é único na plataforma */', u.email, uid)) throw new HttpError(409, 'Este e-mail já está em uso.');
+  if (u.active && !existing.active) assertLimit(req.user.companyId, 'users');
   // Gestor com permissão limitada não mexe nas permissões; o Administrador define (gestor) ou limpa (admin).
   const grants = canManageAll(req.user) ? (u.role === 'admin' ? [] : u.grants) : parseGrants(existing.permissions);
   tx(() => {

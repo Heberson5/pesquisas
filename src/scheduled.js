@@ -60,15 +60,17 @@ async function sendWeeklyReportFor(companyId, { force = false, now = Date.now() 
       ${sc ? (sc.length ? `AND c.branch_id IN (${sc.map(() => '?').join(',')})` : 'AND 0') : ''}`, companyId, ...(sc || [])).n;
     const { html, text } = renderEmail({
       brand: s, title: 'Relatório semanal de satisfação',
-      intro: `Resumo de ${period.from.split('-').reverse().join('/')} a ${period.to.split('-').reverse().join('/')}. O relatório completo em PowerPoint está anexado.`,
+      intro: `Resumo de ${period.from.split('-').reverse().join('/')} a ${period.to.split('-').reverse().join('/')}. ${require('./plans').hasFeature(companyId, 'pptx') ? 'O relatório completo em PowerPoint está anexado.' : ''}`,
       rows: [['NPS', fmtNps(o.nps)], ['Respostas', String(stats.totalResponses)], ['Promotores', pct(o.promoters, o.total)],
         ['Detratores', pct(o.detractors, o.total)], ['Casos pendentes', String(open)],
         ...stats.ranking.slice(0, 5).map((b) => [`${b.position}º ${b.name}`, `NPS ${fmtNps(b.nps)}${b.goal !== null ? ` (meta ${b.goal})` : ''}`])],
       button: { label: 'Abrir o painel', url: `${publicUrl}/admin/` },
       footer: 'Para deixar de receber, desmarque "Relatório semanal" em Minha conta.',
     });
+    // PowerPoint anexado só se o plano incluir o recurso.
+    const pptx = require('./plans').hasFeature(companyId, 'pptx');
     if (queueEmail({ to: r.email, subject: `${s.companyName}: relatório semanal (NPS ${fmtNps(o.nps)})`, text, html, kind: 'weekly_report',
-      attachment: buffer, attachmentName: `relatorio-nps-${period.to}.pptx`, companyId })) sent++;
+      attachment: pptx ? buffer : null, attachmentName: pptx ? `relatorio-nps-${period.to}.pptx` : null, companyId })) sent++;
   }
   audit(null, 'report.weekly_queued', { sent, period }, null, { companyId });
   return { sent, period };
