@@ -20,21 +20,22 @@ const escapeHtml = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&a
 const oneLine = (s, max = 200) => String(s ?? '').replace(/[\r\n\t\u0000-\u001f]+/g, ' ').slice(0, max);
 
 // ------------------------------------------------------------------ enfileiramento
-function queueEmail({ to, subject, text, html, kind = 'email', attachment = null, attachmentName = null }) {
+// companyId: de qual empresa é o envio (usa o e-mail/WhatsApp dela). null = mensagem da plataforma.
+function queueEmail({ to, subject, text, html, kind = 'email', attachment = null, attachmentName = null, companyId = null }) {
   if (!isEmail(to)) return false;
-  run(`INSERT INTO outbox (kind, channel, recipient, subject, body_text, body_html, attachment, attachment_name, next_attempt_at, created_at)
-       VALUES (?,?,?,?,?,?,?,?,?,?)`, kind, 'email', to, oneLine(subject), text, html, attachment, attachmentName ? oneLine(attachmentName, 100) : null, Date.now(), Date.now());
+  run(`INSERT INTO outbox (company_id, kind, channel, recipient, subject, body_text, body_html, attachment, attachment_name, next_attempt_at, created_at)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?)`, companyId, kind, 'email', to, oneLine(subject), text, html, attachment, attachmentName ? oneLine(attachmentName, 100) : null, Date.now(), Date.now());
   return true;
 }
 
-function queueWebhook(url, payload, kind) {
-  run('INSERT INTO outbox (kind, channel, recipient, payload, next_attempt_at, created_at) VALUES (?,?,?,?,?,?)',
-    kind, 'webhook', url, JSON.stringify(payload), Date.now(), Date.now());
+function queueWebhook(url, payload, kind, companyId) {
+  run('INSERT INTO outbox (company_id, kind, channel, recipient, payload, next_attempt_at, created_at) VALUES (?,?,?,?,?,?,?)',
+    companyId, kind, 'webhook', url, JSON.stringify(payload), Date.now(), Date.now());
 }
 
-function queueWhatsApp(phone, payload, kind) {
-  run('INSERT INTO outbox (kind, channel, recipient, payload, next_attempt_at, created_at) VALUES (?,?,?,?,?,?)',
-    kind, 'whatsapp', phone, JSON.stringify(payload), Date.now(), Date.now());
+function queueWhatsApp(phone, payload, kind, companyId) {
+  run('INSERT INTO outbox (company_id, kind, channel, recipient, payload, next_attempt_at, created_at) VALUES (?,?,?,?,?,?,?)',
+    companyId, kind, 'whatsapp', phone, JSON.stringify(payload), Date.now(), Date.now());
 }
 
 // ------------------------------------------------------------------ modelo de e-mail
@@ -110,31 +111,35 @@ function postJson(url, body, headers, { lookup } = {}) {
 }
 
 // Segredo para o destino validar a assinatura do webhook (exibido ao admin em Configurações).
-const webhookSecret = () => sign('webhook-secret-v1');
+// Cada empresa tem o seu (derivado da chave dela): o segredo de uma empresa não valida webhooks de outra.
+const webhookSecret = (companyId) => (companyId ? require('./companies').signFor(companyId, 'webhook-secret-v1') : sign('webhook-secret-v1'));
 
 // ------------------------------------------------------------------ envio
-let transport = null; let transportKey = ''; let transportAt = 0;
+// Um transporte por configuração de SMTP (empresas diferentes podem usar servidores diferentes).
+const transports = new Map();
 // O servidor SMTP é resolvido para um IP público e esse IP é "fixado" (evita apontar para a rede interna / rebinding).
-async function mailer() {
-  const c = delivery.smtp();
+async function mailer(companyId) {
+  const c = delivery.smtp(companyId);
   if (!c) return null;
   const key = JSON.stringify([c.host, c.port, c.secure, c.auth?.user, c.auth?.pass]);
-  if (!transport || key !== transportKey || Date.now() - transportAt > 10 * 60_000) {
+  let t = transports.get(key);
+  if (!t || Date.now() - t.at > 10 * 60_000) {
     const ip = await delivery.resolvePublic(c.host);
-    transport = nodemailer.createTransport({
+    t = { at: Date.now(), transport: nodemailer.createTransport({
       host: ip, port: c.port, secure: c.secure, auth: c.auth, name: 'pesquisa',
       requireTLS: !c.secure, tls: { minVersion: 'TLSv1.2', servername: c.host },
       disableFileAccess: true, disableUrlAccess: true, connectionTimeout: 10000, socketTimeout: 20000,
-    });
-    transportKey = key; transportAt = Date.now();
+    }) };
+    if (transports.size > 200) transports.clear();
+    transports.set(key, t);
   }
-  return { t: transport, from: c.from };
+  return { t: t.transport, from: c.from };
 }
 
 async function deliver(item) {
   if (item.channel === 'email') {
-    const m = await mailer();
-    if (!m) throw new Error('E-mail não configurado. Configure em Configurações → Alertas e envios.');
+    const m = await mailer(item.company_id);
+    if (!m) throw new Error('E-mail não configurado. Configure em Configurações → E-mail e WhatsApp.');
     await m.t.sendMail({
       from: m.from, to: item.recipient, subject: item.subject, text: item.body_text, html: item.body_html,
       disableFileAccess: true, disableUrlAccess: true,
@@ -144,11 +149,11 @@ async function deliver(item) {
     const err = validateWebhookUrl(item.recipient);
     if (err) throw new Error(err);
     const ts = String(Math.floor(Date.now() / 1000));
-    const sig = crypto.createHmac('sha256', webhookSecret()).update(`${ts}.${item.payload}`).digest('hex');
+    const sig = crypto.createHmac('sha256', webhookSecret(item.company_id)).update(`${ts}.${item.payload}`).digest('hex');
     await postJson(item.recipient, item.payload, { 'X-Pesquisa-Timestamp': ts, 'X-Pesquisa-Signature': `sha256=${sig}` }, { lookup: safeLookup });
   } else if (item.channel === 'whatsapp') {
-    const wa = delivery.whatsapp();
-    if (!wa) throw new Error('WhatsApp não configurado. Configure em Configurações → Alertas e envios.');
+    const wa = delivery.whatsapp(item.company_id);
+    if (!wa) throw new Error('WhatsApp não configurado. Configure em Configurações → E-mail e WhatsApp.');
     const p = JSON.parse(item.payload);
     const body = JSON.stringify({
       messaging_product: 'whatsapp', to: item.recipient, type: 'template',
@@ -165,28 +170,28 @@ async function processOutbox(limit = 20) {
   processing = true;
   let sent = 0;
   try {
-    const items = all("SELECT * FROM outbox WHERE status = 'pending' AND next_attempt_at <= ? ORDER BY id LIMIT ?", Date.now(), limit);
+    const items = all("SELECT * FROM outbox WHERE status = 'pending' AND next_attempt_at <= ? ORDER BY id LIMIT ? /* tenant-ok: fila de envio da plataforma; cada item usa a configuração da própria empresa */", Date.now(), limit);
     for (const item of items) {
       try {
         await deliver(item);
-        run("UPDATE outbox SET status = 'sent', sent_at = ?, attempts = attempts + 1, last_error = NULL, attachment = NULL WHERE id = ?", Date.now(), item.id);
+        run("UPDATE outbox SET status = 'sent', sent_at = ?, attempts = attempts + 1, last_error = NULL, attachment = NULL WHERE id = ? /* tenant-ok: fila de envio da plataforma; cada item usa a configuração da própria empresa */", Date.now(), item.id);
         sent++;
       } catch (e) {
         const attempts = item.attempts + 1;
         const done = attempts >= MAX_ATTEMPTS;
-        run('UPDATE outbox SET attempts = ?, status = ?, next_attempt_at = ?, last_error = ? WHERE id = ?',
+        run('UPDATE outbox SET attempts = ?, status = ?, next_attempt_at = ?, last_error = ? WHERE id = ? /* tenant-ok: fila de envio da plataforma; cada item usa a configuração da própria empresa */',
           attempts, done ? 'failed' : 'pending', Date.now() + (BACKOFF_MIN[attempts - 1] || 360) * 60_000, oneLine(e.message, 300), item.id);
       }
     }
     // Limpeza: registros enviados há mais de 90 dias.
-    run("DELETE FROM outbox WHERE status = 'sent' AND sent_at < ?", Date.now() - 90 * 86_400_000);
+    run("DELETE FROM outbox WHERE status = 'sent' AND sent_at < ? /* tenant-ok: fila de envio da plataforma; cada item usa a configuração da própria empresa */", Date.now() - 90 * 86_400_000);
   } finally { processing = false; }
   return sent;
 }
 
 // Confere o token e o número do WhatsApp na Meta (não envia mensagem nenhuma).
-function whatsappCheck() {
-  const wa = delivery.whatsapp();
+function whatsappCheck(companyId = null) {
+  const wa = delivery.whatsapp(companyId);
   if (!wa) return Promise.reject(new Error('WhatsApp não configurado.'));
   return new Promise((resolve, reject) => {
     const req = https.request(`https://graph.facebook.com/v21.0/${wa.phoneId}?fields=display_phone_number,verified_name,quality_rating`,
@@ -205,11 +210,11 @@ function whatsappCheck() {
   });
 }
 
-const outboxStatus = () => ({
-  smtpConfigured: !!delivery.smtp(),
-  whatsappConfigured: !!delivery.whatsapp(),
-  pending: get("SELECT COUNT(*) AS n FROM outbox WHERE status = 'pending'").n,
-  failed: get("SELECT COUNT(*) AS n FROM outbox WHERE status = 'failed' AND created_at > ?", Date.now() - 7 * 86_400_000).n,
+const outboxStatus = (companyId) => ({
+  smtpConfigured: !!delivery.smtp(companyId),
+  whatsappConfigured: !!delivery.whatsapp(companyId),
+  pending: get("SELECT COUNT(*) AS n FROM outbox WHERE company_id = ? AND status = 'pending'", companyId).n,
+  failed: get("SELECT COUNT(*) AS n FROM outbox WHERE company_id = ? AND status = 'failed' AND created_at > ?", companyId, Date.now() - 7 * 86_400_000).n,
 });
 
 module.exports = {

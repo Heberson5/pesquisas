@@ -115,6 +115,14 @@
     root.setProperty('--accent', b.accentColor);
     document.querySelector('meta[name=theme-color]')?.setAttribute('content', b.primaryColor);
     document.title = b.companyName;
+    // Ícones e app instalado com a marca da empresa deste tablet/QR Code.
+    const slug = config?.company?.slug;
+    if (slug && /^[a-z0-9-]{2,60}$/.test(slug)) {
+      const q = '?empresa=' + slug;
+      document.querySelector('link[rel=manifest]')?.setAttribute('href', '/kiosk/manifest.webmanifest' + q);
+      document.querySelector('link[rel=icon]')?.setAttribute('href', '/favicon' + q);
+      document.querySelector('link[rel=apple-touch-icon]')?.setAttribute('href', '/app-icon' + q);
+    }
   }
   const logoEl = (cls) => (config?.branding?.logoUrl ? h('img', { class: cls, src: config.branding.logoUrl, alt: config.branding.companyName }) : null);
 

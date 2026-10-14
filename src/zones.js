@@ -1,10 +1,10 @@
 'use strict';
 // Fuso horário por filial. Ordem de decisão (a mais forte primeiro):
 //   1) fuso escolhido na filial; 2) fuso informado pelo próprio tablet (modo "Automático");
-//   3) fuso da empresa (TZ_EMPRESA) como reserva, inclusive quando o tablet informa algo estranho ou fora do Brasil.
+//   3) fuso padrão da empresa cliente (ou TZ_EMPRESA) como reserva, inclusive quando o tablet informa algo estranho ou fora do Brasil.
 // O servidor sempre usa o PRÓPRIO relógio (confiável) com o fuso escolhido: relógio errado no tablet não atrapalha.
-const config = require('./config');
 const { get } = require('./db');
+const { companyTz } = require('./companies');
 
 // Fusos do Brasil aceitos (o que vier de fora desta lista é ignorado).
 const BR_ZONES = ['America/Noronha', 'America/Belem', 'America/Fortaleza', 'America/Recife', 'America/Araguaina', 'America/Maceio', 'America/Bahia',
@@ -28,8 +28,8 @@ const clean = (tz) => (usable(tz) ? tz : null);
 // Fuso em uso para a filial (e, se informado, para o tablet específico).
 function forBranch(branch, device = null) {
   return clean(branch?.timezone) || clean(device?.timezone)
-    || clean(get('SELECT timezone FROM devices WHERE branch_id = ? AND active = 1 AND timezone IS NOT NULL ORDER BY timezone_at DESC LIMIT 1', branch?.id)?.timezone)
-    || config.timezone;
+    || clean(get('SELECT timezone FROM devices WHERE branch_id = ? AND active = 1 AND timezone IS NOT NULL ORDER BY timezone_at DESC LIMIT 1 /* tenant-ok: unidade já validada pelo chamador */', branch?.id)?.timezone)
+    || clean(companyTz(branch?.company_id)) || companyTz(null);
 }
 
 module.exports = { BR_ZONES, ZONE_CHOICES, clean, usable, forBranch };

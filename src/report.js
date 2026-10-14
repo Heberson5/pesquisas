@@ -53,10 +53,11 @@ function imageSize(buf) {
   return null;
 }
 
-function loadLogo(settings, mediaDir) {
-  if (!settings.logoMediaId) return null;
+// logoFile: caminho do arquivo da logo (já resolvido para a pasta da empresa) ou null.
+function loadLogo(logoFile) {
+  if (!logoFile) return null;
   try {
-    const buf = fs.readFileSync(path.join(mediaDir, settings.logoMediaId));
+    const buf = fs.readFileSync(logoFile);
     const size = imageSize(buf);
     if (!size || !size.w || !size.h) return null;
     const mime = buf[0] === 0x89 ? 'image/png' : buf[0] === 0xff ? 'image/jpeg' : buf.subarray(0, 3).toString('ascii') === 'GIF' ? 'image/gif' : 'image/webp';
@@ -82,7 +83,7 @@ const chartBase = () => ({
   titleFontFace: FONT, titleColor: INK, titleFontSize: 14, valAxisMinVal: 0,
 });
 
-async function buildReport({ settings, stats, surveys, filters, mediaDir, generatedBy }) {
+async function buildReport({ settings, stats, surveys, filters, logoFile, generatedBy }) {
   const pres = new PptxGenJS();
   pres.layout = 'LAYOUT_WIDE';
   pres.theme = { headFontFace: FONT, bodyFontFace: FONT };
@@ -93,7 +94,7 @@ async function buildReport({ settings, stats, surveys, filters, mediaDir, genera
   const primary = hex(settings.primaryColor);
   const accent = hex(settings.accentColor);
   const onPrimary = isDark(primary) ? 'FFFFFF' : INK;
-  const logo = loadLogo(settings, mediaDir);
+  const logo = loadLogo(logoFile);
   const period = filters.from || filters.to ? `${fmtDay(filters.from) || 'início'} a ${fmtDay(filters.to) || 'hoje'}` : 'Todo o período';
   const scopeText = [filters.branch ? `Filial: ${filters.branch}` : 'Todas as filiais', filters.survey ? `Pesquisa: ${filters.survey}` : null]
     .filter(Boolean).join('  ·  ');

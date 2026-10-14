@@ -96,7 +96,7 @@
       h('div', { class: 'login-hero' },
         branding.logoUrl ? h('div', {}, h('span', { class: 'logo-box' }, h('img', { src: branding.logoUrl, alt: branding.companyName })))
           : h('div', { class: 'row' }, h('span', { class: 'brand-mark' }, initials(branding.companyName)), h('b', {}, branding.companyName)),
-        h('div', {}, h('h2', {}, 'A opinião dos seus clientes, de todas as filiais, em um só lugar.'),
+        h('div', {}, h('h2', {}, 'A opinião dos seus clientes, de todas as unidades, em um só lugar.'),
           h('p', {}, 'NPS em tempo real, relatórios em PowerPoint e tablets em modo quiosque.'))),
       h('div', { class: 'login-side' }, h('div', { class: 'login' }, h('h1', {}, title), sub ? h('p', { class: 'muted' }, sub) : null, ...content))));
   }
@@ -219,30 +219,40 @@
     const r = await api('/me');
     if (r.mfaSetupRequired) { csrf = r.csrf; showMfaSetup(true); throw new Error('401'); }
     me = r.user; csrf = r.csrf; questionTypes = r.questionTypes; displays = r.displays; settings = r.settings; contactModes = r.contactModes;
-    applyBranding({ companyName: settings.companyName, primaryColor: settings.primaryColor, accentColor: settings.accentColor,
-      logoUrl: settings.logoMediaId ? '/media/' + settings.logoMediaId : null });
+    // Permissões vêm do servidor (que confere tudo de novo); aqui só decidem o que aparece na tela.
+    const perms = new Set(me.permissions || []);
+    me.can = (p) => perms.has(p);
+    me.company = r.company; me.acting = r.acting; me.grantable = r.grantable || [];
+    for (const k of Object.keys(cache)) delete cache[k];
+    const b = settings || r.platform;
+    applyBranding({ companyName: b.companyName, primaryColor: b.primaryColor, accentColor: b.accentColor,
+      logoUrl: settings?.logoMediaId ? '/media/' + settings.logoMediaId : null });
   }
+  const ROLE_LABEL = { master: 'Master', admin: 'Administrador', gestor: 'Gestor de unidade' };
+  // Página visível? Sem empresa em uso (Master fora de uma empresa) só aparecem as páginas da plataforma.
+  const canSee = (p) => (p[3] === 'master' ? me.role === 'master' : !!me.company && (!p[3] || (typeof p[3] === 'function' ? p[3]() : me.can(p[3]))));
 
   // ------------------------------------------------------------ layout + rotas
-  // [rota, rótulo, página, perfil exigido, grupo]
+  // [rota, rótulo, página, permissão exigida ('master' = só o Master), grupo]
   const PAGES = [
-    ['dashboard', 'Visão geral', pageDashboard, null, 'Análise'],
-    ['casos', 'Casos', pageCases, null, 'Análise'],
-    ['respostas', 'Respostas', pageResponses, null, 'Análise'],
+    ['empresas', 'Empresas', pageCompanies, 'master', 'Plataforma'],
+    ['dashboard', 'Visão geral', pageDashboard, 'dashboard.view', 'Análise'],
+    ['casos', 'Casos', pageCases, 'cases.manage', 'Análise'],
+    ['respostas', 'Respostas', pageResponses, 'dashboard.view', 'Análise'],
     ['pesquisas', 'Pesquisas', pageSurveys, null, 'Coleta'],
-    ['filiais', 'Filiais', pageBranches, null, 'Coleta'],
+    ['filiais', 'Unidades', pageBranches, null, 'Coleta'],
     ['dispositivos', 'Tablets', pageDevices, null, 'Coleta'],
-    ['usuarios', 'Usuários', pageUsers, 'admin', 'Administração'],
-    ['configuracoes', 'Configurações', pageSettings, 'admin', 'Administração'],
-    ['auditoria', 'Auditoria', pageAudit, 'admin', 'Administração'],
-    ['conta', 'Minha conta', pageAccount, null, 'Administração'],
+    ['usuarios', 'Usuários', pageUsers, () => me.can('users.manage') || me.can('users.gestores'), 'Administração'],
+    ['configuracoes', 'Configurações', pageSettings, 'settings.manage', 'Administração'],
+    ['auditoria', 'Auditoria', pageAudit, 'audit.view', 'Administração'],
+    ['conta', 'Minha conta', pageAccount, () => true, 'Administração'],
   ];
   const menuIcon = (id) => settings?.menuIcons?.[id] || window.Icons.MENU_DEFAULTS[id];
 
   function layout(active, content) {
     const collapsed = prefs.get('sidebar', 'open') === 'collapsed';
     const shell = h('div', { class: 'layout' + (collapsed ? ' collapsed' : '') });
-    const visible = PAGES.filter((p) => !p[3] || me.role === p[3]);
+    const visible = PAGES.filter((p) => p[0] === 'conta' || canSee(p));
     const groups = [...new Set(visible.map((p) => p[4]))];
     const dark = document.documentElement.dataset.theme === 'dark';
     const toggleCollapse = () => {
@@ -269,13 +279,14 @@
             icon(dark ? 'sun' : 'moon'), h('span', {}, dark ? 'Tema claro' : 'Tema escuro')),
           collapseBtn,
           h('div', { class: 'who', title: me.name }, h('span', { class: 'avatar' }, initials(me.name)),
-            h('div', { class: 'who-text' }, h('b', {}, me.name), h('span', {}, me.role === 'admin' ? 'Administrador' : 'Gestor de filial'))),
+            h('div', { class: 'who-text' }, h('b', {}, me.name), h('span', {}, ROLE_LABEL[me.role] || me.role))),
           h('button', { class: 'side-btn', title: 'Sair', onclick: async () => { await api('/logout', { method: 'POST' }).catch(() => {}); me = null; showLogin(); } },
             icon('logout'), h('span', {}, 'Sair')))),
       h('div', {},
         h('div', { class: 'mobile-bar' },
           h('button', { class: 'btn secondary icon-only', 'aria-label': 'Abrir menu', onclick: () => shell.classList.add('mobile-open') }, icon('menu')),
           h('b', {}, branding.companyName)),
+        actingBanner(),
         h('main', { class: 'main' }, content)));
     shell.addEventListener('click', (e) => { if (e.target === shell) shell.classList.remove('mobile-open'); });
     root.replaceChildren(shell);
@@ -287,7 +298,8 @@
     if (reset) return showReset(reset[1]);
     if (!me) { try { await loadMe(); } catch { return; } }
     const [, name = 'dashboard', param] = location.hash.split('/');
-    const page = PAGES.find((p) => p[0] === name && (!p[3] || me.role === p[3])) || PAGES[0];
+    const visible = PAGES.filter((p) => p[0] === 'conta' || canSee(p));
+    const page = visible.find((p) => p[0] === name) || visible[0];
     const container = h('div', {}, h('p', { class: 'muted' }, 'Carregando…'));
     layout(page[0], container);
     try { container.replaceChildren(await page[2](param)); } catch (e) { if (e.message !== '401') container.replaceChildren(h('div', { class: 'card bad' }, e.message)); }
@@ -321,7 +333,7 @@
   function filterBar(state, onChange, { withSurvey = true } = {}) {
     const from = h('input', { type: 'date', value: state.from });
     const to = h('input', { type: 'date', value: state.to });
-    const br = h('select', {}, h('option', { value: '' }, 'Todas as filiais'), cache.branches.map((b) => h('option', { value: String(b.id) }, b.name)));
+    const br = h('select', {}, h('option', { value: '' }, 'Todas as unidades'), cache.branches.map((b) => h('option', { value: String(b.id) }, b.name)));
     br.value = state.branchId || '';
     const sv = h('select', {}, h('option', { value: '' }, 'Todas as pesquisas'), cache.surveys.map((s) => h('option', { value: String(s.id) }, s.title)));
     sv.value = state.surveyId || '';
@@ -334,7 +346,7 @@
     [from, to, br, sv, ch, uf].forEach((el) => el.addEventListener('change', apply));
     return h('div', { class: 'filters card' },
       h('label', { class: 'f' }, 'De', from), h('label', { class: 'f' }, 'Até', to),
-      h('label', { class: 'f' }, 'Filial', br), withSurvey ? h('label', { class: 'f' }, 'Pesquisa', sv) : null, h('label', { class: 'f' }, 'Canal', ch), h('label', { class: 'f' }, 'Estado do cliente', uf));
+      h('label', { class: 'f' }, 'Unidade', br), withSurvey ? h('label', { class: 'f' }, 'Pesquisa', sv) : null, h('label', { class: 'f' }, 'Canal', ch), h('label', { class: 'f' }, 'Estado do cliente', uf));
   }
   const qs = (state) => new URLSearchParams(Object.entries(state).filter(([, v]) => v)).toString();
   const UFS = ['AC', 'AL', 'AM', 'AP', 'BA', 'CE', 'DF', 'ES', 'GO', 'MA', 'MG', 'MS', 'MT', 'PA', 'PB', 'PE', 'PI', 'PR', 'RJ', 'RN', 'RO', 'RR', 'RS', 'SC', 'SE', 'SP', 'TO'];
@@ -350,7 +362,7 @@
       body.replaceChildren(renderStats(s));
     };
     await load();
-    return h('div', {}, pageHead('Visão geral', 'Indicador NPS e satisfação das filiais', exportButtons()), filterBar(filterState, load), body);
+    return h('div', {}, pageHead('Visão geral', 'Indicador NPS e satisfação das unidades', exportButtons()), filterBar(filterState, load), body);
   }
 
   function exportButtons() {
@@ -389,7 +401,7 @@
     }));
 
     const byBranch = h('div', { class: 'table-wrap' }, h('table', {},
-      h('thead', {}, h('tr', {}, h('th', {}, 'Filial'), h('th', {}, 'Respostas'), h('th', {}, 'NPS'), h('th', {}, 'Composição'))),
+      h('thead', {}, h('tr', {}, h('th', {}, 'Unidade'), h('th', {}, 'Respostas'), h('th', {}, 'NPS'), h('th', {}, 'Composição'))),
       h('tbody', {}, s.byBranch.length ? s.byBranch.map((b) => h('tr', {},
         h('td', {}, b.name), h('td', {}, b.responses), h('td', { class: npsClass(b.nps) }, h('b', {}, fmtNps(b.nps))), h('td', {}, b.total ? npsStack(b) : '—')))
         : h('tr', {}, h('td', { colspan: '4', class: 'empty' }, 'Nenhuma resposta no período.')))));
@@ -403,7 +415,7 @@
         h('div', { class: 'card' }, h('h2', {}, 'Evolução diária'), trendChart(s.trend)),
         h('div', { class: 'card' }, h('h2', {}, 'Distribuição das notas (0 a 10)'), dist)),
       rankingCard(s), regionCard(s),
-      h('div', { class: 'card' }, h('h2', {}, 'NPS por filial'), byBranch,
+      h('div', { class: 'card' }, h('h2', {}, 'NPS por unidade'), byBranch,
         h('div', { class: 'legend' }, h('span', {}, h('i', { class: 'lp' }), 'Promotores'), h('span', {}, h('i', { class: 'ln' }), 'Neutros'), h('span', {}, h('i', { class: 'ld' }), 'Detratores'))),
       h('div', { class: 'grid c2' },
         h('div', { class: 'card' }, h('h2', {}, 'NPS por pergunta marcada'), byQuestion),
@@ -426,13 +438,13 @@
       h('p', { class: 'small muted' }, `${s.linkNoGeo || 0} respostas do QR Code sem localização (o cliente não autorizou ou o aparelho não informou). Cidade = município do IBGE mais próximo do ponto informado; o ponto é guardado com ~1 km de precisão.`));
   }
 
-  // Ranking das filiais com a meta de NPS de cada uma.
+  // Ranking das unidades com a meta de NPS de cada uma.
   function rankingCard(s) {
     if (!s.ranking.length) return null;
     const medal = ['🥇', '🥈', '🥉'];
-    return h('div', { class: 'card' }, h('h2', {}, 'Ranking das filiais'),
+    return h('div', { class: 'card' }, h('h2', {}, 'Ranking das unidades'),
       h('div', { class: 'table-wrap' }, h('table', {},
-        h('thead', {}, h('tr', {}, h('th', {}, '#'), h('th', {}, 'Filial'), h('th', {}, 'NPS'), h('th', {}, 'Meta'), h('th', {}, 'Situação'), h('th', {}, 'Respostas'))),
+        h('thead', {}, h('tr', {}, h('th', {}, '#'), h('th', {}, 'Unidade'), h('th', {}, 'NPS'), h('th', {}, 'Meta'), h('th', {}, 'Situação'), h('th', {}, 'Respostas'))),
         h('tbody', {}, s.ranking.map((b) => h('tr', {},
           h('td', {}, h('b', {}, medal[b.position - 1] || `${b.position}º`)),
           h('td', {}, b.name),
@@ -485,7 +497,7 @@
         k('history', '', 'Tempo médio até resolver', sum.avgHours === null ? '—' : `${sum.avgHours.toLocaleString('pt-BR')} h`)));
       const pages = Math.max(1, Math.ceil(r.total / r.pageSize));
       body.replaceChildren(h('div', { class: 'card table-wrap' }, h('table', {},
-        h('thead', {}, h('tr', {}, h('th', {}, 'Quando'), h('th', {}, 'Filial'), h('th', {}, 'Nota'), h('th', {}, 'Comentário'), h('th', {}, 'Status'), h('th', {}, 'Responsável'), h('th', {}))),
+        h('thead', {}, h('tr', {}, h('th', {}, 'Quando'), h('th', {}, 'Unidade'), h('th', {}, 'Nota'), h('th', {}, 'Comentário'), h('th', {}, 'Status'), h('th', {}, 'Responsável'), h('th', {}))),
         h('tbody', {}, r.rows.length ? r.rows.map((c) => h('tr', {},
           h('td', {}, fmtDate(c.created_at), c.channel === 'link' ? h('div', { class: 'small muted' }, 'via QR Code') : null),
           h('td', {}, c.branch), h('td', {}, h('b', { class: 'bad' }, c.min_score)),
@@ -504,13 +516,13 @@
       [['pendentes', 'Pendentes (abertos e em contato)'], ['', 'Todos'], ['aberto', 'Abertos'], ['em_contato', 'Em contato'], ['resolvido', 'Resolvidos'], ['sem_retorno', 'Sem retorno']]
         .map(([v, l]) => h('option', { value: v }, l)));
     st.value = caseState.status;
-    const br = h('select', { onchange: (e) => { caseState.branchId = e.target.value; load(); } }, h('option', { value: '' }, 'Todas as filiais'), cache.branches.map((b) => h('option', { value: String(b.id) }, b.name)));
+    const br = h('select', { onchange: (e) => { caseState.branchId = e.target.value; load(); } }, h('option', { value: '' }, 'Todas as unidades'), cache.branches.map((b) => h('option', { value: String(b.id) }, b.name)));
     br.value = caseState.branchId;
     const mine = h('input', { type: 'checkbox', checked: caseState.mine === '1', onchange: (e) => { caseState.mine = e.target.checked ? '1' : ''; load(); } });
     await load();
     if (param) setTimeout(() => openCase(Number(param), load), 0);
     return h('div', {}, pageHead('Casos', 'Clientes que deram nota de 0 a 6 — acompanhe até resolver'),
-      kpis, h('div', { class: 'filters card' }, h('label', { class: 'f' }, 'Status', st), h('label', { class: 'f' }, 'Filial', br), h('label', { class: 'chk' }, mine, 'Só os meus')), body);
+      kpis, h('div', { class: 'filters card' }, h('label', { class: 'f' }, 'Status', st), h('label', { class: 'f' }, 'Unidade', br), h('label', { class: 'chk' }, mine, 'Só os meus')), body);
   }
 
   async function openCase(caseId, reload) {
@@ -546,9 +558,9 @@
   }
 
   // ------------------------------------------------------------ respostas
-  // Onde a resposta foi dada: QR Code = região informada pelo cliente (se ele autorizou); tablet = cidade da filial.
+  // Onde a resposta foi dada: QR Code = região informada pelo cliente (se ele autorizou); tablet = cidade da unidade.
   function locationBadge(x) {
-    if (x.channel !== 'link') return h('div', { class: 'small muted loc' }, icon('map-pin', 13), x.branch_city ? `${x.branch_city} (loja)` : 'Cidade da filial não cadastrada');
+    if (x.channel !== 'link') return h('div', { class: 'small muted loc' }, icon('map-pin', 13), x.branch_city ? `${x.branch_city} (loja)` : 'Cidade da unidade não cadastrada');
     if (!x.geo_region) return h('div', { class: 'small muted loc' }, icon('map-pin', 13), 'Local não informado');
     const place = x.geo_region === 'Fora do Brasil' ? 'Fora do Brasil' : [x.geo_city, x.geo_uf].filter(Boolean).join('/') + ` · ${x.geo_region}`;
     const link = x.geo_lat !== null && x.geo_lat !== undefined
@@ -566,14 +578,14 @@
 
   async function pageResponses() {
     await Promise.all([branches(), surveys()]);
-    const isAdmin = me.role === 'admin'; // só administrador exclui respostas (o servidor também confere)
+    const isAdmin = me.can('responses.delete'); // Administrador (e Master dentro da empresa); o servidor também confere
     let page = 1;
     const body = h('div');
     // Apaga tudo o que o filtro atual mostra (limpeza dos testes). Exige digitar EXCLUIR.
     const deleteFiltered = (total) => {
       const word = h('input', { placeholder: 'EXCLUIR', autocomplete: 'off' });
       modal('Excluir respostas filtradas', h('div', {},
-        h('p', {}, `Serão excluídas definitivamente ${total} respostas (com os casos e anotações ligados a elas), conforme os filtros da tela: período, filial, pesquisa e canal.`),
+        h('p', {}, `Serão excluídas definitivamente ${total} respostas (com os casos e anotações ligados a elas), conforme os filtros da tela: período, unidade, pesquisa e canal.`),
         h('p', { class: 'small muted' }, 'Isso não pode ser desfeito. Faça um backup antes se tiver dúvida. Digite EXCLUIR para confirmar.'), word),
       [{ label: 'Excluir definitivamente', cls: 'danger', onClick: async (close) => {
         try {
@@ -590,7 +602,7 @@
         h('div', { class: 'row between' }, h('p', { class: 'muted' }, `${r.total} respostas encontradas`),
           isAdmin && r.total ? h('button', { class: 'btn danger sm', onclick: () => deleteFiltered(r.total) }, icon('trash', 14), 'Excluir todas as filtradas') : null),
         h('div', { class: 'table-wrap' }, h('table', {},
-          h('thead', {}, h('tr', {}, h('th', {}, 'Data'), h('th', {}, 'Filial'), h('th', {}, 'Localização'), h('th', {}, 'Dispositivo'), h('th', {}, 'Pesquisa'), h('th', {}, 'Respostas'), isAdmin ? h('th', {}) : null)),
+          h('thead', {}, h('tr', {}, h('th', {}, 'Data'), h('th', {}, 'Unidade'), h('th', {}, 'Localização'), h('th', {}, 'Dispositivo'), h('th', {}, 'Pesquisa'), h('th', {}, 'Respostas'), isAdmin ? h('th', {}) : null)),
           h('tbody', {}, r.rows.length ? r.rows.map((x) => h('tr', {},
             h('td', {}, fmtDate(x.submitted_at), x.lang && x.lang !== 'pt' ? h('div', {}, h('span', { class: 'badge' }, x.lang.toUpperCase())) : null),
             h('td', {}, x.branch),
@@ -620,7 +632,7 @@
     const list = await surveys(true);
     return h('div', {},
       pageHead('Pesquisas', 'Perguntas exibidas nos tablets e marcação do NPS',
-        me.role === 'admin' ? h('a', { class: 'btn', href: '#/pesquisas/nova' }, icon('plus', 18), 'Nova pesquisa') : null),
+        me.can('surveys.manage') ? h('a', { class: 'btn', href: '#/pesquisas/nova' }, icon('plus', 18), 'Nova pesquisa') : null),
       h('div', { class: 'card table-wrap' }, h('table', {},
         h('thead', {}, h('tr', {}, h('th', {}, 'Título'), h('th', {}, 'Perguntas'), h('th', {}, 'NPS'), h('th', {}, 'Respostas'), h('th', {}, 'Status'), h('th', {}))),
         h('tbody', {}, list.length ? list.map((s) => h('tr', {},
@@ -628,36 +640,36 @@
           h('td', {}, s.questions), h('td', {}, s.nps_questions ? h('span', { class: 'badge nps' }, `${s.nps_questions} marcada(s)`) : h('span', { class: 'badge warn' }, 'nenhuma')),
           h('td', {}, s.responses), h('td', {}, h('span', { class: 'badge ' + (s.active ? 'ok' : 'off') }, s.active ? 'Ativa' : 'Inativa')),
           h('td', {}, h('div', { class: 'row' },
-            h('a', { class: 'btn secondary sm', href: '#/pesquisas/' + s.id }, me.role === 'admin' ? 'Editar' : 'Ver'),
-            me.role === 'admin' ? h('button', { class: 'btn secondary sm', onclick: async () => {
+            h('a', { class: 'btn secondary sm', href: '#/pesquisas/' + s.id }, s.editable ? 'Editar' : 'Ver'),
+            me.can('surveys.manage') ? h('button', { class: 'btn secondary sm', onclick: async () => {
               const r = await api(`/surveys/${s.id}/duplicate`, { method: 'POST' }); toast('Pesquisa duplicada.'); location.hash = '#/pesquisas/' + r.id;
             } }, 'Duplicar') : null))))
           : h('tr', {}, h('td', { colspan: '6', class: 'empty' }, 'Nenhuma pesquisa criada.'))))),
       await campaignsCard(list));
   }
 
-  // Campanhas: trocam a pesquisa de uma filial (ou de todas) por um período, e voltam sozinhas à padrão.
+  // Campanhas: trocam a pesquisa de uma unidade (ou de todas) por um período, e voltam sozinhas à padrão.
   async function campaignsCard(svs) {
     const [rows, brs] = await Promise.all([api('/schedules'), branches()]);
     const now = Date.now();
     const status = (c) => (c.ends_at <= now ? h('span', { class: 'badge' }, 'Encerrada') : c.starts_at <= now ? h('span', { class: 'badge ok' }, 'No ar') : h('span', { class: 'badge warn' }, 'Agendada'));
     const add = () => {
       const sv = h('select', {}, svs.filter((s) => s.active).map((s) => h('option', { value: String(s.id) }, s.title)));
-      const br = h('select', {}, h('option', { value: '' }, 'Todas as filiais'), brs.map((b) => h('option', { value: String(b.id) }, b.name)));
+      const br = h('select', {}, h('option', { value: '' }, 'Todas as unidades'), brs.map((b) => h('option', { value: String(b.id) }, b.name)));
       const st = h('input', { type: 'datetime-local' }); const en = h('input', { type: 'datetime-local' });
-      modal('Agendar campanha', h('div', { class: 'form-grid' }, h('label', { class: 'f' }, 'Pesquisa', sv), h('label', { class: 'f' }, 'Filial', br),
+      modal('Agendar campanha', h('div', { class: 'form-grid' }, h('label', { class: 'f' }, 'Pesquisa', sv), h('label', { class: 'f' }, 'Unidade', br),
         h('label', { class: 'f' }, 'Início', st), h('label', { class: 'f' }, 'Fim', en),
-        h('p', { class: 'small muted' }, 'O dia e a hora valem no fuso da filial escolhida (ou no da empresa, quando for "Todas as filiais").')),
+        h('p', { class: 'small muted' }, 'O dia e a hora valem no fuso da unidade escolhida (ou no da empresa, quando for "Todas as unidades").')),
       [{ label: 'Agendar', onClick: async (close) => {
         try { await api('/schedules', { method: 'POST', body: { surveyId: Number(sv.value), branchId: br.value ? Number(br.value) : null, startsAt: st.value, endsAt: en.value } }); close(); toast('Campanha agendada.'); route(); } catch (ex) { toast(ex.message, true); }
       } }]);
     };
     return h('div', { class: 'card' },
       h('div', { class: 'topbar' }, h('div', {}, h('h2', {}, 'Campanhas agendadas'), h('div', { class: 'small muted' }, 'Durante o período, a pesquisa da campanha substitui a padrão; depois, tudo volta sozinho.')),
-        me.role === 'admin' ? h('button', { class: 'btn secondary', onclick: add }, icon('calendar', 16), 'Agendar campanha') : null),
-      rows.length ? h('div', { class: 'table-wrap' }, h('table', {}, h('thead', {}, h('tr', {}, h('th', {}, 'Pesquisa'), h('th', {}, 'Filial'), h('th', {}, 'Período'), h('th', {}, 'Situação'), h('th', {}))),
+        me.can('schedules.manage') ? h('button', { class: 'btn secondary', onclick: add }, icon('calendar', 16), 'Agendar campanha') : null),
+      rows.length ? h('div', { class: 'table-wrap' }, h('table', {}, h('thead', {}, h('tr', {}, h('th', {}, 'Pesquisa'), h('th', {}, 'Unidade'), h('th', {}, 'Período'), h('th', {}, 'Situação'), h('th', {}))),
         h('tbody', {}, rows.map((c) => h('tr', {}, h('td', {}, c.survey), h('td', {}, c.branch || 'Todas'), h('td', { class: 'small' }, `${fmtDateTz(c.starts_at, c.tz)} → ${fmtDateTz(c.ends_at, c.tz)}`),
-          h('td', {}, status(c)), h('td', {}, me.role === 'admin' ? h('button', { class: 'btn secondary sm', onclick: async () => {
+          h('td', {}, status(c)), h('td', {}, me.can('schedules.manage') ? h('button', { class: 'btn secondary sm', onclick: async () => {
             if (!confirm('Excluir esta campanha?')) return;
             try { await api('/schedules/' + c.id, { method: 'DELETE' }); route(); } catch (ex) { toast(ex.message, true); }
           } }, 'Excluir') : null))))))
@@ -678,7 +690,7 @@
 
   async function surveyEditor(sid) {
     const s = sid ? await api('/surveys/' + sid) : structuredClone(NEW_SURVEY);
-    const ro = me.role !== 'admin';
+    const ro = sid ? !s.editable : !me.can('surveys.manage'); // gestor: só pesquisas usadas apenas nas unidades dele
     const locked = s.has_responses;
     const f = {};
     const field = (key, label, type = 'text', extra = {}) => {
@@ -872,14 +884,15 @@
         h('label', { class: 'f' }, 'Imagem ou vídeo curto (até 25 MB)', file, mediaPreview))));
   }
 
-  // ------------------------------------------------------------ filiais
+  // ------------------------------------------------------------ unidades
   const DAYS = ['Domingo', 'Segunda', 'Terça', 'Quarta', 'Quinta', 'Sexta', 'Sábado'];
   const parseList = (j) => { try { const v = JSON.parse(j || '[]'); return Array.isArray(v) ? v : []; } catch { return []; } };
   const lines = (el) => el.value.split(/[\n,;]+/).map((x) => x.trim()).filter(Boolean);
 
   async function pageBranches() {
     const [list, svs, tzInfo] = await Promise.all([branches(true), surveys(true), api('/timezones')]);
-    const isAdmin = me.role === 'admin';
+    const canEdit = me.can('branches.edit');
+    const canCreate = me.can('branches.create');
     const tzName = (tz) => (tzInfo.choices.find((c) => c.value === tz)?.label) || tz;
     const edit = (b = {}) => {
       const tzSel = h('select', {}, h('option', { value: 'auto' }, 'Automático — usar o fuso do tablet'), tzInfo.choices.map((c) => h('option', { value: c.value }, c.label)));
@@ -903,14 +916,14 @@
       });
       const hoursBox = h('div', { class: 'hours' + (hours ? '' : ' hidden') }, dayRows.map((r) => r.el));
       useHours.addEventListener('change', () => hoursBox.classList.toggle('hidden', !useHours.checked));
-      modal(b.id ? 'Editar filial' : 'Nova filial', h('div', {},
+      modal(b.id ? 'Editar unidade' : 'Nova unidade', h('div', {},
         h('div', { class: 'form-grid' },
           h('label', { class: 'f' }, 'Código', code), h('label', { class: 'f' }, 'Nome', name), h('label', { class: 'f' }, 'Cidade', city),
           h('label', { class: 'f' }, 'Meta de NPS', goal), h('label', { class: 'chk' }, active, 'Ativa')),
         h('h2', { class: 'mt' }, 'Alertas de cliente insatisfeito'),
-        h('div', { class: 'form-grid' }, h('label', { class: 'f' }, 'E-mails da filial', emails), h('label', { class: 'f' }, 'WhatsApp (se configurado)', phones)),
+        h('div', { class: 'form-grid' }, h('label', { class: 'f' }, 'E-mails da unidade', emails), h('label', { class: 'f' }, 'WhatsApp (se configurado)', phones)),
         h('h2', { class: 'mt' }, 'Horário de funcionamento'),
-        h('label', { class: 'f' }, 'Fuso horário da filial', tzSel,
+        h('label', { class: 'f' }, 'Fuso horário da unidade', tzSel,
           h('span', { class: 'small muted' }, b.id ? `Em uso agora: ${tzName(b.effective_tz)}${b.timezone ? '' : ' (informado pelo tablet)'}. ` : '',
             `Em "Automático" o horário abaixo vale no fuso configurado no tablet; se o tablet informar algo fora do Brasil, vale o da empresa (${tzName(tzInfo.company)}).`)),
         h('label', { class: 'chk' }, useHours, 'Definir horário (fora dele o tablet mostra tela de descanso e não gera alerta de "sem sinal")'),
@@ -920,17 +933,17 @@
           const body = { code: code.value, name: name.value, city: city.value, active: active.checked, nps_goal: goal.value === '' ? null : Number(goal.value),
             alert_emails: lines(emails), alert_phones: lines(phones), timezone: tzSel.value === 'auto' ? null : tzSel.value, hours: useHours.checked ? dayRows.map((r) => r.get()) : null };
           await api(b.id ? '/branches/' + b.id : '/branches', { method: b.id ? 'PUT' : 'POST', body });
-          close(); toast('Filial salva.'); route();
+          close(); toast('Unidade salva.'); route();
         } catch (ex) { toast(ex.message, true); }
       } }]);
     };
     return h('div', {},
-      pageHead('Filiais', 'Cada filial coleta separadamente e exibe sua própria pesquisa', isAdmin ? h('button', { class: 'btn', onclick: () => edit() }, icon('plus', 18), 'Nova filial') : null),
+      pageHead('Unidades', 'Cada unidade coleta separadamente e exibe sua própria pesquisa', canCreate ? h('button', { class: 'btn', onclick: () => edit() }, icon('plus', 18), 'Nova unidade') : null),
       h('div', { class: 'card table-wrap' }, h('table', {},
-        h('thead', {}, h('tr', {}, h('th', {}, 'Código'), h('th', {}, 'Filial'), h('th', {}, 'Pesquisa padrão dos tablets'), h('th', {}, 'Meta'), h('th', {}, 'Tablets'), h('th', {}, 'Status'), h('th', {}))),
+        h('thead', {}, h('tr', {}, h('th', {}, 'Código'), h('th', {}, 'Unidade'), h('th', {}, 'Pesquisa padrão dos tablets'), h('th', {}, 'Meta'), h('th', {}, 'Tablets'), h('th', {}, 'Status'), h('th', {}))),
         h('tbody', {}, list.length ? list.map((b) => {
           const sel = h('select', { onchange: async (e) => {
-            try { await api(`/branches/${b.id}/survey`, { method: 'PUT', body: { surveyId: e.target.value ? Number(e.target.value) : null } }); toast('Pesquisa da filial atualizada. Os tablets recebem em até 1 minuto.'); cache.branches = null; } catch (ex) { toast(ex.message, true); }
+            try { await api(`/branches/${b.id}/survey`, { method: 'PUT', body: { surveyId: e.target.value ? Number(e.target.value) : null } }); toast('Pesquisa da unidade atualizada. Os tablets recebem em até 1 minuto.'); cache.branches = null; } catch (ex) { toast(ex.message, true); }
           } }, h('option', { value: '' }, '— nenhuma —'), svs.filter((s) => s.active).map((s) => h('option', { value: String(s.id) }, s.title)));
           sel.value = b.survey_id ? String(b.survey_id) : '';
           return h('tr', {}, h('td', {}, h('code', {}, b.code)), h('td', {}, h('b', {}, b.name), h('div', { class: 'small muted' }, b.city || ''), h('div', { class: 'small muted' }, `Fuso: ${tzName(b.effective_tz)}`)),
@@ -938,14 +951,14 @@
             h('td', {}, h('span', { class: 'badge ' + (b.active ? 'ok' : 'off') }, b.active ? 'Ativa' : 'Inativa'), b.public_enabled ? h('span', { class: 'badge ok' }, 'QR ativo') : null),
             h('td', {}, h('div', { class: 'row' },
               h('button', { class: 'btn secondary sm', onclick: () => openLink(b) }, 'QR Code'),
-              isAdmin ? h('button', { class: 'btn secondary sm', onclick: () => edit(b) }, 'Editar') : null)));
-        }) : h('tr', {}, h('td', { colspan: '7', class: 'empty' }, 'Nenhuma filial cadastrada.'))))));
+              canEdit ? h('button', { class: 'btn secondary sm', onclick: () => edit(b) }, 'Editar') : null)));
+        }) : h('tr', {}, h('td', { colspan: '7', class: 'empty' }, 'Nenhuma unidade cadastrada.'))))));
   }
 
-  // Link/QR Code público da filial + cartaz para imprimir.
+  // Link/QR Code público da unidade + cartaz para imprimir.
   async function openLink(b) {
     let info = await api(`/branches/${b.id}/public-link`);
-    const isAdmin = me.role === 'admin';
+    const isAdmin = me.can('branches.edit');
     const box = h('div');
     const draw = () => {
       box.replaceChildren(
@@ -954,7 +967,7 @@
           h('div', { class: 'poster-title' }, 'Avalie nosso atendimento'),
           h('img', { class: 'poster-qr', src: info.qr, alt: 'QR Code da pesquisa' }),
           h('div', { class: 'poster-sub' }, 'Aponte a câmera do celular · leva menos de 1 minuto'),
-          h('div', { class: 'poster-branch' }, b.name)) : h('p', { class: 'muted' }, 'O link desta filial ainda não foi criado.'),
+          h('div', { class: 'poster-branch' }, b.name)) : h('p', { class: 'muted' }, 'O link desta unidade ainda não foi criado.'),
         info.url ? h('p', { class: 'small' }, h('code', { class: 'secret' }, info.url)) : null,
         h('p', { class: 'small muted' }, info.enabled ? 'Ativo: qualquer pessoa com o QR pode responder (limite de 10 respostas por hora por aparelho).' : 'Desativado: o link não aceita respostas.'),
         h('div', { class: 'row' },
@@ -988,17 +1001,17 @@
     const add = () => {
       const br = h('select', {}, brs.filter((b) => b.active).map((b) => h('option', { value: String(b.id) }, b.name)));
       const name = h('input', { placeholder: 'Ex.: Tablet recepção', maxlength: '60' });
-      modal('Novo tablet', h('div', { class: 'form-grid' }, h('label', { class: 'f' }, 'Filial', br), h('label', { class: 'f' }, 'Identificação', name)),
+      modal('Novo tablet', h('div', { class: 'form-grid' }, h('label', { class: 'f' }, 'Unidade', br), h('label', { class: 'f' }, 'Identificação', name)),
         [{ label: 'Gerar código', onClick: async (close) => {
           try { const r = await api('/devices', { method: 'POST', body: { branchId: Number(br.value), name: name.value } }); close(); await route(); showCode(r, name.value); } catch (ex) { toast(ex.message, true); }
         } }]);
     };
     return h('div', {},
-      pageHead('Tablets', 'Dispositivos de coleta vinculados às filiais', h('button', { class: 'btn secondary', onclick: showGuide }, icon('file', 18), 'Guia de instalação'),
+      pageHead('Tablets', 'Dispositivos de coleta vinculados às unidades', h('button', { class: 'btn secondary', onclick: showGuide }, icon('file', 18), 'Guia de instalação'),
         brs.length ? h('button', { class: 'btn', onclick: add }, icon('plus', 18), 'Novo tablet') : null),
-      h('p', { class: 'muted' }, 'Cada tablet é vinculado a uma única filial. As respostas coletadas nele são sempre gravadas nessa filial — o tablet não consegue escolher ou trocar de filial.'),
+      h('p', { class: 'muted' }, 'Cada tablet é vinculado a uma única unidade. As respostas coletadas nele são sempre gravadas nessa unidade — o tablet não consegue escolher ou trocar de unidade.'),
       h('div', { class: 'card table-wrap' }, h('table', {},
-        h('thead', {}, h('tr', {}, h('th', {}, 'Tablet'), h('th', {}, 'Filial'), h('th', {}, 'Status'), h('th', {}, 'Último contato'), h('th', {}))),
+        h('thead', {}, h('tr', {}, h('th', {}, 'Tablet'), h('th', {}, 'Unidade'), h('th', {}, 'Status'), h('th', {}, 'Último contato'), h('th', {}))),
         h('tbody', {}, devs.length ? devs.map((d) => h('tr', {},
           h('td', {}, h('b', {}, d.name), h('div', { class: 'small muted' }, d.timezone ? `Fuso do tablet: ${d.timezone}` : 'Fuso ainda não informado')), h('td', {}, d.branch_name), h('td', {}, status(d)), h('td', {}, fmtDate(d.last_seen_at)),
           h('td', {}, h('div', { class: 'row' },
@@ -1032,14 +1045,57 @@
       h('p', { class: 'small muted' }, 'Tablet perdido? Use "Revogar". Sem internet, as respostas ficam guardadas e são enviadas depois. O guia completo está em docs/INSTALACAO-TABLET.md.')));
   }
 
+  // ------------------------------------------------------------ Master: empresas da plataforma
+  // Faixa fixa quando o Master está dentro de uma empresa: deixa claro onde ele está e até quando.
+  function actingBanner() {
+    if (!me.acting || !me.company) return null;
+    const until = new Date(me.acting.until).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+    return h('div', { class: 'acting-banner', role: 'status' }, icon('shield', 16),
+      h('span', {}, 'Você está na empresa ', h('b', {}, me.company.name), ` como Master (até ${until}). Tudo o que fizer fica registrado na auditoria dela.`),
+      h('button', { class: 'btn secondary sm', onclick: async () => {
+        try { await api('/master/leave', { method: 'POST' }); me = null; location.hash = '#/empresas'; await route(); } catch (ex) { toast(ex.message, true); }
+      } }, 'Sair da empresa'));
+  }
+
+  async function pageCompanies() {
+    const list = await api('/master/companies');
+    const enter = (c) => {
+      const reason = h('input', { maxlength: '200', placeholder: 'Ex.: suporte solicitado pelo cliente por e-mail' });
+      modal('Entrar na empresa ' + c.name, h('div', {},
+        h('p', {}, 'Você verá e poderá alterar os dados desta empresa por até 2 horas. A entrada e tudo o que fizer ficam registrados na auditoria dela.'),
+        h('label', { class: 'f' }, 'Motivo (obrigatório)', reason)),
+      [{ label: 'Entrar', onClick: async (close) => {
+        try { await api('/master/act', { method: 'POST', body: { companyId: c.id, reason: reason.value } }); close(); me = null; location.hash = '#/dashboard'; await route(); } catch (ex) { toast(ex.message, true); }
+      } }]);
+    };
+    const STATUS_CLS = { active: 'ok', trial: 'warn', past_due: 'warn', suspended: 'off', canceled: 'off' };
+    return h('div', {},
+      pageHead('Empresas', 'Clientes da plataforma. Para ver ou ajustar os dados de uma empresa, entre nela informando o motivo.'),
+      h('div', { class: 'card table-wrap' }, h('table', {},
+        h('thead', {}, h('tr', {}, h('th', {}, 'Empresa'), h('th', {}, 'Situação'), h('th', {}, 'Unidades'), h('th', {}, 'Tablets'), h('th', {}, 'Usuários'), h('th', {}, 'Respostas (30 dias)'), h('th', {}))),
+        h('tbody', {}, list.length ? list.map((c) => h('tr', {},
+          h('td', {}, h('b', {}, c.name), h('div', { class: 'small muted' }, c.cnpj ? 'CNPJ ' + c.cnpj.replace(/^(\d{2})(\d{3})(\d{3})(\d{4})(\d{2})$/, '$1.$2.$3/$4-$5') : c.slug)),
+          h('td', {}, h('span', { class: 'badge ' + (STATUS_CLS[c.status] || '') }, c.statusLabel)),
+          h('td', {}, c.branches), h('td', {}, c.devices), h('td', {}, c.users), h('td', {}, c.responses30d),
+          h('td', {}, me.company?.id === c.id ? h('span', { class: 'badge ok' }, 'Você está aqui') : h('button', { class: 'btn secondary sm', onclick: () => enter(c) }, 'Entrar'))))
+          : h('tr', {}, h('td', { colspan: '7', class: 'empty' }, 'Nenhuma empresa cadastrada. Use: npm run create-company -- "Nome"'))))));
+  }
+
   // ------------------------------------------------------------ usuários
   async function pageUsers() {
     const [users, brs] = await Promise.all([api('/users'), branches(true)]);
     const edit = (u = {}) => {
       const name = h('input', { value: u.name || '', maxlength: '100' });
       const email = h('input', { type: 'email', value: u.email || '', maxlength: '254' });
-      const role = h('select', {}, h('option', { value: 'gestor' }, 'Gestor de filial'), h('option', { value: 'admin' }, 'Administrador'));
+      // Só o Administrador escolhe o perfil e libera permissões; o gestor autorizado cadastra apenas gestores.
+      const full = me.can('users.manage');
+      const role = h('select', { disabled: !full }, h('option', { value: 'gestor' }, 'Gestor de unidade'), h('option', { value: 'admin' }, 'Administrador'));
       role.value = u.role || 'gestor';
+      const grants = new Set(u.permissions || []);
+      const permBox = h('div', { class: 'perm-box' }, h('div', { class: 'small muted' }, 'Permissões extras deste gestor (além do padrão: painel, respostas, casos, pesquisas, unidades, tablets e campanhas)'),
+        me.grantable.map((g) => h('label', { class: 'chk' }, h('input', { type: 'checkbox', checked: grants.has(g.id), onchange: (e) => { e.target.checked ? grants.add(g.id) : grants.delete(g.id); } }), g.label)));
+      const syncRole = () => permBox.classList.toggle('hidden', !full || role.value !== 'gestor');
+      role.addEventListener('change', syncRole); syncRole();
       const pw = h('input', { type: 'password', autocomplete: 'new-password', placeholder: u.id ? 'Deixe em branco para manter' : 'Mín. 10 caracteres, letras e números' });
       const active = h('input', { type: 'checkbox', checked: u.id ? !!u.active : true });
       const resetMfa = h('input', { type: 'checkbox' });
@@ -1050,23 +1106,24 @@
         h('label', { class: 'f' }, 'Nome', name), h('label', { class: 'f' }, 'E-mail', email), h('label', { class: 'f' }, 'Perfil', role),
         h('label', { class: 'f' }, 'Senha', pw), h('label', { class: 'chk' }, active, 'Ativo'),
         u.id && u.totp_enabled && u.id !== me.id ? h('label', { class: 'chk', title: 'Use quando a pessoa perdeu o celular' }, resetMfa, 'Resetar 2FA (perdeu o celular)') : null,
-        h('div', {}, h('div', { class: 'small muted' }, 'Filiais que o gestor pode ver'), brBox)),
+        h('div', {}, h('div', { class: 'small muted' }, 'Unidades que o gestor pode ver'), brBox), permBox),
       [{ label: 'Salvar', onClick: async (close) => {
         try {
           await api(u.id ? '/users/' + u.id : '/users', { method: u.id ? 'PUT' : 'POST', body: {
-            name: name.value, email: email.value, role: role.value, password: pw.value || null, active: active.checked, branches: [...chosen], unlock: true, resetMfa: resetMfa.checked } });
+            name: name.value, email: email.value, role: role.value, password: pw.value || null, active: active.checked, branches: [...chosen], unlock: true, resetMfa: resetMfa.checked,
+            ...(full && role.value === 'gestor' ? { permissions: [...grants] } : {}) } });
           close(); toast('Usuário salvo.'); route();
         } catch (ex) { toast(ex.message, true); }
       } }]);
     };
     const bName = (id) => brs.find((b) => b.id === id)?.name || id;
     return h('div', {},
-      pageHead('Usuários', 'Administradores e gestores de filial', h('button', { class: 'btn', onclick: () => edit() }, icon('plus', 18), 'Novo usuário')),
+      pageHead('Usuários', me.can('users.manage') ? 'Administradores e gestores de unidade' : 'Gestores das suas unidades', h('button', { class: 'btn', onclick: () => edit() }, icon('plus', 18), 'Novo usuário')),
       h('div', { class: 'card table-wrap' }, h('table', {},
-        h('thead', {}, h('tr', {}, h('th', {}, 'Nome'), h('th', {}, 'Perfil'), h('th', {}, 'Filiais'), h('th', {}, 'Status'), h('th', {}))),
+        h('thead', {}, h('tr', {}, h('th', {}, 'Nome'), h('th', {}, 'Perfil'), h('th', {}, 'Unidades'), h('th', {}, 'Status'), h('th', {}))),
         h('tbody', {}, users.map((u) => h('tr', {},
           h('td', {}, h('b', {}, u.name), h('div', { class: 'small muted' }, u.email)),
-          h('td', {}, u.role === 'admin' ? 'Administrador' : 'Gestor'),
+          h('td', {}, ROLE_LABEL[u.role] || u.role, (u.permissions || []).length ? h('div', { class: 'small muted' }, '+ ' + u.permissions.map((p) => me.grantable.find((g) => g.id === p)?.label || p).join('; ')) : null),
           h('td', { class: 'small' }, u.role === 'admin' ? 'Todas' : (u.branches.map(bName).join(', ') || '—')),
           h('td', {}, h('span', { class: 'badge ' + (u.active ? 'ok' : 'off') }, u.active ? 'Ativo' : 'Inativo'),
             u.locked_until && u.locked_until > Date.now() ? h('span', { class: 'badge warn' }, 'Bloqueado') : null,
@@ -1214,17 +1271,17 @@
     return h('div', {},
       h('div', { class: 'grid c2' },
         h('div', { class: 'card' }, h('h2', {}, 'Cliente insatisfeito (nota 0 a 6)'),
-          h('p', { class: 'small muted' }, 'Cada nota baixa abre um caso em "Casos" e avisa a filial. Os destinatários de cada filial ficam no cadastro da filial; usuários escolhem em Minha conta.'),
+          h('p', { class: 'small muted' }, 'Cada nota baixa abre um caso em "Casos" e avisa a unidade. Os destinatários de cada unidade ficam no cadastro da unidade; usuários escolhem em Minha conta.'),
           chk(st.alerts.detractorEmail, (v) => { st.alerts.detractorEmail = v; }, 'Enviar e-mail na hora'),
           h('label', { class: 'f mt' }, 'Webhook (opcional — integra com n8n, Zapier, Make, Slack…)', webhook),
-          h('p', { class: 'small muted' }, 'Envia filial, nota e link do caso (sem dados pessoais), assinado com HMAC-SHA256 no cabeçalho X-Pesquisa-Signature. Segredo: ', h('code', { class: 'secret' }, n.webhookSecret)),
+          h('p', { class: 'small muted' }, 'Envia unidade, nota e link do caso (sem dados pessoais), assinado com HMAC-SHA256 no cabeçalho X-Pesquisa-Signature. Segredo: ', h('code', { class: 'secret' }, n.webhookSecret)),
           h('div', { class: 'form-grid mt' }, h('label', { class: 'f' }, 'Modelo aprovado do WhatsApp (Meta)', waTpl), h('label', { class: 'f' }, 'Idioma do modelo', waLang)),
-          h('p', { class: 'small muted' }, 'WhatsApp: ', status(n.whatsappConfigured, 'configurado', 'não configurado — veja a aba "E-mail e WhatsApp"'), ' · parâmetros do modelo: {{1}} filial, {{2}} nota, {{3}} link.')),
+          h('p', { class: 'small muted' }, 'WhatsApp: ', status(n.whatsappConfigured, 'configurado', 'não configurado — veja a aba "E-mail e WhatsApp"'), ' · parâmetros do modelo: {{1}} unidade, {{2}} nota, {{3}} link.')),
         h('div', { class: 'card' }, h('h2', {}, 'Relatório semanal por e-mail'),
           chk(st.weeklyReport.enabled, (v) => { st.weeklyReport.enabled = v; }, 'Enviar automaticamente o PowerPoint da semana'),
           h('div', { class: 'form-grid mt' }, h('label', { class: 'f' }, 'Dia', day), h('label', { class: 'f' }, 'Hora (Brasília)', hour)),
-          h('label', { class: 'f mt' }, 'Destinatários extras (recebem todas as filiais)', extra),
-          h('p', { class: 'small muted' }, 'Administradores e gestores recebem conforme a preferência em Minha conta; cada gestor recebe apenas as filiais dele.'),
+          h('label', { class: 'f mt' }, 'Destinatários extras (recebem todas as unidades)', extra),
+          h('p', { class: 'small muted' }, 'Administradores e gestores recebem conforme a preferência em Minha conta; cada gestor recebe apenas as unidades dele.'),
           h('button', { class: 'btn secondary sm', onclick: async () => {
             try { const r = await api('/settings/weekly-report/send-now', { method: 'POST' }); toast(`Relatório enviado para ${r.sent} destinatário(s).`); renderAgain(); } catch (ex) { toast(ex.message, true); }
           } }, 'Enviar agora (teste)'))),
@@ -1236,7 +1293,7 @@
             h('label', { class: 'f' }, h('span', {}, 'Escurecimento ', dimLabel), dimLevel)),
           h('p', { class: 'small muted' }, 'Um toque na tela volta ao brilho normal na hora. No Fully Kiosk (Android) o brilho do aparelho é reduzido de verdade, se a opção "JavaScript Interface" estiver ligada; nos demais, uma camada escura reduz o brilho (em telas OLED/iPad isso também poupa bateria). O tablet pega a mudança em até 1 minuto. No iPad, deixe também Ajustes → Tela e Brilho → Bloqueio Automático em "Nunca".')),
         h('div', { class: 'card' }, h('h2', {}, 'Metas e alertas'),
-          h('div', { class: 'form-grid' }, h('label', { class: 'f' }, 'Meta de NPS padrão (cada filial pode ter a sua)', goal)),
+          h('div', { class: 'form-grid' }, h('label', { class: 'f' }, 'Meta de NPS padrão (cada unidade pode ter a sua)', goal)),
           chk(st.offlineAlert.enabled, (v) => { st.offlineAlert.enabled = v; }, 'Avisar quando um tablet ficar sem sinal no horário de funcionamento'),
           h('div', { class: 'form-grid' }, h('label', { class: 'f' }, 'Minutos sem sinal para avisar', offMin)))));
   }
@@ -1294,14 +1351,14 @@
     const testPhone = h('input', { placeholder: '5511999990000 (opcional, para enviar um teste)', inputmode: 'numeric' });
     const waCard = h('div', { class: 'card' }, h('h2', {}, 'WhatsApp (API oficial da Meta)'),
       h('p', {}, origin(d.whatsapp)),
-      h('p', { class: 'small muted' }, 'Avisa por WhatsApp quando chega uma nota baixa. Os números que recebem são cadastrados em Filiais (campo WhatsApp) e, para cada pessoa, em Minha conta. O modelo da mensagem fica na aba "Alertas e relatórios".'),
+      h('p', { class: 'small muted' }, 'Avisa por WhatsApp quando chega uma nota baixa. Os números que recebem são cadastrados em Unidades (campo WhatsApp) e, para cada pessoa, em Minha conta. O modelo da mensagem fica na aba "Alertas e relatórios".'),
       h('div', { class: 'form-grid' }, field('Identificador do número (Phone number ID)', phoneId, 'Painel da Meta → WhatsApp → Configuração da API.'),
         field('Token de acesso', token, 'Use um token permanente (usuário do sistema), não o temporário de 24 h.')),
       h('ol', { class: 'small muted steps' },
         h('li', {}, 'Em developers.facebook.com crie um app do tipo "Empresa" e adicione o produto WhatsApp.'),
         h('li', {}, 'Cadastre e verifique o número da empresa e copie o Identificador do número.'),
         h('li', {}, 'Em "Usuários do sistema" gere um token permanente com a permissão whatsapp_business_messaging.'),
-        h('li', {}, 'Crie e aprove um modelo de mensagem com 3 variáveis ({{1}} filial, {{2}} nota, {{3}} link) e informe o nome dele na aba "Alertas e relatórios".')),
+        h('li', {}, 'Crie e aprove um modelo de mensagem com 3 variáveis ({{1}} unidade, {{2}} nota, {{3}} link) e informe o nome dele na aba "Alertas e relatórios".')),
       h('div', { class: 'row' },
         h('button', { class: 'btn', onclick: async () => {
           try { await api('/settings/delivery', { method: 'PUT', body: { whatsapp: { phoneId: phoneId.value, token: token.value } } }); toast('WhatsApp salvo. Use "Testar conexão".'); rerender(); } catch (ex) { toast(ex.message, true); }
@@ -1376,22 +1433,22 @@
   // ------------------------------------------------------------ auditoria
   // ------------------------------------------------------------ auditoria (histórico em português simples)
   const CASE_STATUS = { aberto: 'Aberto', em_contato: 'Em contato', resolvido: 'Resolvido', sem_retorno: 'Sem retorno' };
-  const ROLE = { admin: 'Administrador', gestor: 'Gestor' };
+  const ROLE = { master: 'Master', admin: 'Administrador', gestor: 'Gestor' };
   const CHANNEL = { tablet: 'tablet', link: 'QR Code' };
-  const AUDIT_CATS = { acesso: 'Acesso ao sistema', conta: 'Senhas e segurança da conta', usuarios: 'Usuários', cadastros: 'Filiais, pesquisas e configurações',
+  const AUDIT_CATS = { acesso: 'Acesso ao sistema', conta: 'Senhas e segurança da conta', usuarios: 'Usuários', cadastros: 'Unidades, pesquisas e configurações',
     tablets: 'Tablets', dados: 'Respostas, casos e relatórios', lgpd: 'Privacidade (LGPD)', sistema: 'Rotinas automáticas' };
   const dayBR = (iso) => (/^\d{4}-\d{2}-\d{2}$/.test(iso || '') ? iso.split('-').reverse().join('/') : iso);
 
-  // Cada ação vira uma frase. ctx traz nomes de filiais, pesquisas, usuários e tablets para trocar números por nomes.
+  // Cada ação vira uma frase. ctx traz nomes de unidades, pesquisas, usuários e tablets para trocar números por nomes.
   function auditEvent(r, ctx) {
     const d = (() => { try { return r.detail ? JSON.parse(r.detail) : {}; } catch { return {}; } })() || {};
-    const br = (i) => (i ? `a filial "${ctx.branches.get(Number(i)) || '#' + i}"` : '');
+    const br = (i) => (i ? `a unidade "${ctx.branches.get(Number(i)) || '#' + i}"` : '');
     const brName = (i) => ctx.branches.get(Number(i)) || (i ? '#' + i : '');
     const sv = (i) => ctx.surveys.get(Number(i)) || (i ? '#' + i : '');
     const filt = (f = {}) => {
       const p = [];
       if (f.from || f.to) p.push(`período ${dayBR(f.from) || '…'} a ${dayBR(f.to) || '…'}`);
-      if (f.branchId) p.push(`filial ${brName(f.branchId)}`);
+      if (f.branchId) p.push(`unidade ${brName(f.branchId)}`);
       if (f.surveyId) p.push(`pesquisa ${sv(f.surveyId)}`);
       if (f.channel) p.push(`canal ${CHANNEL[f.channel] || f.channel}`);
       if (f.uf) p.push(`estado ${({ _fora: 'fora do Brasil', _sem: 'QR sem localização' })[f.uf] || f.uf}`);
@@ -1402,6 +1459,9 @@
     switch (r.action) {
       case 'login.ok': return E('acesso', 'ok', 'Entrou no sistema', d.mfa ? 'Com verificação em duas etapas.' : 'Só com senha (sem verificação em duas etapas).');
       case 'logout': return E('acesso', '', 'Saiu do sistema');
+      case 'master.enter_company': return E('acesso', 'warn', 'Master (suporte da plataforma) entrou na empresa', d.reason ? `Motivo informado: ${d.reason}` : '');
+      case 'master.leave_company': return E('acesso', '', 'Master (suporte da plataforma) saiu da empresa');
+      case 'login.company_canceled': return E('acesso', 'bad', 'Tentativa de entrada com a empresa cancelada');
       case 'login.failed': return E('acesso', 'warn', 'Tentativa de entrada recusada', `Senha ou e-mail incorretos${d.email ? ' (e-mail digitado: ' + d.email + ')' : ''}.`);
       case 'login.mfa_failed': return E('acesso', 'warn', 'Código da verificação em duas etapas errado', 'A senha estava certa, mas o código do aplicativo não.');
       case 'mfa.bad_password': return E('conta', 'warn', 'Senha errada ao mexer na verificação em duas etapas');
@@ -1414,18 +1474,18 @@
       case 'password.reset_unknown': return E('conta', 'warn', 'Pedido de nova senha para e-mail não cadastrado', d.email ? `E-mail digitado: ${d.email}.` : '');
       case 'password.reset_done': return E('conta', 'ok', 'Definiu uma nova senha pelo link do e-mail');
       case 'user.password_changed': return E('conta', 'ok', 'Trocou a própria senha');
-      case 'user.create': return E('usuarios', '', `Criou o usuário ${d.email || ''}`, `Perfil: ${ROLE[d.role] || d.role}${d.role === 'gestor' ? ` · ${plural((d.branches || []).length, 'filial', 'filiais')}: ${(d.branches || []).map(brName).join(', ') || 'nenhuma'}` : ''}.`);
+      case 'user.create': return E('usuarios', '', `Criou o usuário ${d.email || ''}`, `Perfil: ${ROLE[d.role] || d.role}${d.role === 'gestor' ? ` · ${plural((d.branches || []).length, 'unidade', 'filiais')}: ${(d.branches || []).map(brName).join(', ') || 'nenhuma'}` : ''}.`);
       case 'user.update': {
         const bits = [`Perfil: ${ROLE[d.role] || d.role}`, d.active === 0 || d.active === false ? 'usuário DESATIVADO' : 'usuário ativo'];
         if (d.passwordReset) bits.push('senha redefinida pelo administrador');
         if (d.resetMfa) bits.push('verificação em duas etapas reiniciada');
         return E('usuarios', d.active === 0 || d.active === false || d.resetMfa ? 'warn' : '', `Alterou o usuário ${d.email || '#' + d.id}`, bits.join(' · ') + '.');
       }
-      case 'branch.create': return E('cadastros', '', `Cadastrou a filial "${d.name || d.code || '#' + d.id}"`, [d.code && `Código ${d.code}`, d.city].filter(Boolean).join(' · '));
-      case 'branch.update': return E('cadastros', '', `Alterou a filial "${d.name || brName(d.id)}"`, d.active === 0 || d.active === false ? 'Filial DESATIVADA.' : '');
-      case 'branch.set_survey': return E('cadastros', '', `Definiu a pesquisa padrão da filial "${brName(d.branchId)}"`, d.surveyId ? `Pesquisa: ${sv(d.surveyId)}.` : 'Sem pesquisa padrão.');
-      case 'branch.public_link': return E('cadastros', d.regenerated ? 'warn' : '', `${d.regenerated ? 'Gerou um novo QR Code/link' : d.enabled ? 'Ativou o QR Code/link' : 'Desativou o QR Code/link'} da filial "${brName(d.branchId)}"`, d.regenerated ? 'O QR Code antigo parou de funcionar.' : '');
-      case 'schedule.create': return E('cadastros', '', `Agendou uma campanha${d.branchId ? ' na filial "' + brName(d.branchId) + '"' : ' em todas as filiais'}`, `Pesquisa: ${sv(d.surveyId)} · de ${d.startsAt ? new Date(d.startsAt).toLocaleString('pt-BR', { dateStyle: 'short', timeStyle: 'short' }) : '…'} a ${d.endsAt ? new Date(d.endsAt).toLocaleString('pt-BR', { dateStyle: 'short', timeStyle: 'short' }) : '…'}.`);
+      case 'branch.create': return E('cadastros', '', `Cadastrou a unidade "${d.name || d.code || '#' + d.id}"`, [d.code && `Código ${d.code}`, d.city].filter(Boolean).join(' · '));
+      case 'branch.update': return E('cadastros', '', `Alterou a unidade "${d.name || brName(d.id)}"`, d.active === 0 || d.active === false ? 'Unidade DESATIVADA.' : '');
+      case 'branch.set_survey': return E('cadastros', '', `Definiu a pesquisa padrão da unidade "${brName(d.branchId)}"`, d.surveyId ? `Pesquisa: ${sv(d.surveyId)}.` : 'Sem pesquisa padrão.');
+      case 'branch.public_link': return E('cadastros', d.regenerated ? 'warn' : '', `${d.regenerated ? 'Gerou um novo QR Code/link' : d.enabled ? 'Ativou o QR Code/link' : 'Desativou o QR Code/link'} da unidade "${brName(d.branchId)}"`, d.regenerated ? 'O QR Code antigo parou de funcionar.' : '');
+      case 'schedule.create': return E('cadastros', '', `Agendou uma campanha${d.branchId ? ' na unidade "' + brName(d.branchId) + '"' : ' em todas as unidades'}`, `Pesquisa: ${sv(d.surveyId)} · de ${d.startsAt ? new Date(d.startsAt).toLocaleString('pt-BR', { dateStyle: 'short', timeStyle: 'short' }) : '…'} a ${d.endsAt ? new Date(d.endsAt).toLocaleString('pt-BR', { dateStyle: 'short', timeStyle: 'short' }) : '…'}.`);
       case 'schedule.delete': return E('cadastros', '', 'Excluiu uma campanha agendada');
       case 'survey.create': return E('cadastros', '', `Criou a pesquisa "${d.title || sv(d.id)}"`);
       case 'survey.update': return E('cadastros', '', `Alterou a pesquisa "${d.title || sv(d.id)}"`);
@@ -1433,12 +1493,12 @@
       case 'media.upload': return E('cadastros', '', `Enviou ${String(d.mime || '').startsWith('video/') ? 'um vídeo' : 'uma imagem'}`, d.size ? `Tamanho: ${d.size > 1048576 ? (d.size / 1048576).toFixed(1) + ' MB' : Math.round(d.size / 1024) + ' KB'}.` : '');
       case 'settings.update': return E('cadastros', '', 'Alterou as configurações do sistema', d.companyName ? `Empresa: ${d.companyName}.` : '');
       case 'settings.delivery': return E('cadastros', 'warn', 'Alterou a configuração de e-mail/WhatsApp', [d.smtp && `E-mail: ${d.smtp}`, d.whatsapp && `WhatsApp: ${d.whatsapp}`].filter(Boolean).join(' · ') + '. (senhas e tokens não são registrados)');
-      case 'device.create': return E('tablets', '', `Cadastrou o tablet "${d.name || '#' + d.id}"`, d.branchId ? `Filial: ${brName(d.branchId)}.` : '');
+      case 'device.create': return E('tablets', '', `Cadastrou o tablet "${d.name || '#' + d.id}"`, d.branchId ? `Unidade: ${brName(d.branchId)}.` : '');
       case 'device.new_code': return E('tablets', 'warn', `Gerou um novo código de pareamento para o tablet "${ctx.devices.get(Number(d.id)) || '#' + d.id}"`, 'O tablet atual perdeu o acesso até ser pareado de novo.');
       case 'device.revoke': return E('tablets', 'warn', `Revogou o acesso do tablet "${ctx.devices.get(Number(d.id)) || '#' + d.id}"`, 'Ele não coleta mais respostas.');
       case 'device.paired': return E('tablets', 'ok', `Um tablet foi pareado${d.deviceId ? ': "' + (ctx.devices.get(Number(d.deviceId)) || '#' + d.deviceId) + '"' : ''}`);
       case 'device.pair_failed': return E('tablets', 'warn', 'Tentativa de parear tablet com código errado ou vencido');
-      case 'response.delete': return E('dados', 'bad', 'Excluiu uma resposta', `Filial ${brName(d.branchId)} · pesquisa ${sv(d.surveyId)}.`);
+      case 'response.delete': return E('dados', 'bad', 'Excluiu uma resposta', `Unidade ${brName(d.branchId)} · pesquisa ${sv(d.surveyId)}.`);
       case 'responses.delete_filtered': return E('dados', 'bad', `Excluiu ${plural(d.count ?? 0, 'resposta', 'respostas')} de uma vez`, `Filtro usado: ${filt(d.filter)}.`);
       case 'responses.export': return E('dados', '', `Exportou ${plural(d.count ?? 0, 'resposta', 'respostas')} em planilha (CSV)`, `Filtro: ${filt(d.filter)}.`);
       case 'report.pptx': return E('dados', '', 'Gerou o relatório em PowerPoint', `Filtro: ${filt(d.filter)}.`);
@@ -1461,7 +1521,7 @@
       users: new Map(users.map((u) => [u.id, u.name])), devices: new Map(devs.map((x) => [x.id, x.name])) };
     const events = rows.map((r) => ({ r, e: auditEvent(r, ctx) }));
     const cat = h('select', {}, h('option', { value: '' }, 'Todos os tipos'), Object.entries(AUDIT_CATS).map(([k, l]) => h('option', { value: k }, l)));
-    const search = h('input', { type: 'search', placeholder: 'Buscar por pessoa, filial, palavra…' });
+    const search = h('input', { type: 'search', placeholder: 'Buscar por pessoa, unidade, palavra…' });
     const onlyAlerts = h('input', { type: 'checkbox' });
     const list = h('div', { class: 'card table-wrap' });
     const ago = (t) => { const m = Math.round((Date.now() - t) / 60000); return m < 1 ? 'agora' : m < 60 ? `há ${m} min` : m < 1440 ? `há ${Math.round(m / 60)} h` : ''; };
@@ -1473,7 +1533,7 @@
         h('thead', {}, h('tr', {}, ['Quando', 'Quem', 'O que aconteceu', 'De onde'].map((t) => h('th', {}, t)))),
         h('tbody', {}, shown.length ? shown.map(({ r, e }) => h('tr', { class: e.tone ? 'tone-' + e.tone : '' },
           h('td', {}, h('div', {}, fmtDate(r.at)), h('div', { class: 'small muted' }, ago(r.at))),
-          h('td', {}, r.name ? h('div', {}, h('b', {}, r.name), h('div', { class: 'small muted' }, r.email)) : h('span', { class: 'muted' }, r.action.startsWith('login.') || r.action.startsWith('password.') || r.action === 'device.pair_failed' || r.action === 'device.paired' ? 'Visitante / aparelho' : 'Sistema (automático)')),
+          h('td', {}, r.name ? h('div', {}, h('b', {}, r.name), r.as_master ? h('span', { class: 'badge warn', title: 'Suporte da plataforma' }, 'Master') : null, h('div', { class: 'small muted' }, r.email)) : h('span', { class: 'muted' }, r.action.startsWith('login.') || r.action.startsWith('password.') || r.action === 'device.pair_failed' || r.action === 'device.paired' ? 'Visitante / aparelho' : 'Sistema (automático)')),
           h('td', {}, h('div', {}, e.tone && e.tone !== '' && e.tone !== 'ok' ? h('span', { class: 'badge ' + (e.tone === 'bad' ? 'off' : 'warn') }, TONE_LABEL[e.tone]) : null, e.tone && e.tone !== 'ok' ? ' ' : '', h('b', {}, e.title)),
             e.detail ? h('div', { class: 'small muted' }, e.detail) : null, h('div', { class: 'small muted' }, AUDIT_CATS[e.cat])),
           h('td', { class: 'small' }, r.ip || '—')))
@@ -1521,9 +1581,9 @@
           mfa.required ? h('p', { class: 'small muted' }, 'Obrigatório para administradores nesta empresa.') : null),
         h('div', { class: 'card' }, h('h2', {}, 'Minhas notificações'),
           h('div', { class: 'grid' },
-            notif('detractors', 'Cliente insatisfeito (nota de 0 a 6) nas minhas filiais'),
+            notif('detractors', 'Cliente insatisfeito (nota de 0 a 6) nas minhas unidades'),
             notif('reports', 'Relatório semanal em PowerPoint'),
-            notif('offline', 'Tablet sem sinal nas minhas filiais'),
+            notif('offline', 'Tablet sem sinal nas minhas unidades'),
             h('label', { class: 'f mt' }, 'Meu WhatsApp para receber o alerta de cliente insatisfeito (opcional)', wa,
               h('span', { class: 'small muted' }, 'DDD + número, ex.: 11 99999-0000. Só funciona se o WhatsApp estiver configurado em Configurações → E-mail e WhatsApp. Deixe em branco para não receber.')),
             h('div', { class: 'row' }, h('button', { class: 'btn secondary sm', onclick: async () => {

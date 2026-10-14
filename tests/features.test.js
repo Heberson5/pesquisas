@@ -55,7 +55,7 @@ test('estilo padrão (números/carinhas coloridos) e esquema de cores são salvo
   for (const [defaultDisplay, colorScheme] of [['numbers', 'bands'], ['faces', 'gradient'], ['icons', 'bands']]) {
     const r = await admin.req('PUT', '/api/admin/settings', { body: { defaultDisplay, colorScheme } });
     assert.equal(r.status, 200, r.text);
-    const pub = (await new Client().req('GET', '/api/public/branding')).json;
+    const pub = (await new Client().req('GET', '/api/public/branding?empresa=empresa-teste')).json;
     assert.equal(pub.defaultDisplay, defaultDisplay); assert.equal(pub.colorScheme, colorScheme);
   }
   const base = { title: 'Pesquisa padrão', welcome_title: 'Olá', thanks_title: 'Ok', thanks_seconds: 5, idle_seconds: 30 };
@@ -88,7 +88,7 @@ test('configurações: só administrador altera; exige CSRF', async () => {
   assert.equal((await gestor.req('PUT', '/api/admin/settings', { body: { companyName: 'Hacker' } })).status, 403);
   assert.equal((await new Client().req('PUT', '/api/admin/settings', { body: { companyName: 'Hacker' } })).status, 401);
   assert.equal((await admin.req('PUT', '/api/admin/settings', { body: { companyName: 'Hacker' }, headers: { 'X-CSRF-Token': 'x' } })).status, 403);
-  assert.notEqual((await new Client().req('GET', '/api/public/branding')).json.companyName, 'Hacker');
+  assert.notEqual((await new Client().req('GET', '/api/public/branding?empresa=empresa-teste')).json.companyName, 'Hacker');
 });
 
 test('configurações: cores, ícones e arquivos maliciosos são recusados', async () => {
@@ -107,12 +107,12 @@ test('configurações válidas aplicam marca pública, favicon e manifesto do ap
   const r = await admin.req('PUT', '/api/admin/settings', { body: { companyName: 'Loja A & B <teste>', primaryColor: '#123456', accentColor: '#abcdef',
     logoMediaId: pngId, faviconMediaId: pngId, appIconMediaId: pngId, ratingIcon: 'heart', menuIcons: { dashboard: 'gauge' }, faceStyle: 'mono' } });
   assert.equal(r.status, 200, r.text);
-  const pub = (await new Client().req('GET', '/api/public/branding')).json;
+  const pub = (await new Client().req('GET', '/api/public/branding?empresa=empresa-teste')).json;
   assert.deepEqual(Object.keys(pub).sort(), ['accentColor', 'colorScheme', 'companyName', 'defaultDisplay', 'faceStyle', 'logoUrl', 'primaryColor', 'privacyText', 'ratingIcon', 'screen']);
   assert.equal(pub.logoUrl, '/media/' + pngId);
-  const fav = await new Client().req('GET', '/favicon');
+  const fav = await new Client().req('GET', '/favicon?empresa=empresa-teste');
   assert.equal(fav.headers.get('content-type'), 'image/png');
-  const man = await new Client().req('GET', '/kiosk/manifest.webmanifest');
+  const man = await new Client().req('GET', '/kiosk/manifest.webmanifest?empresa=empresa-teste');
   assert.equal(JSON.parse(man.text).name, 'Loja A & B <teste>');
   assert.equal(JSON.parse(man.text).theme_color, '#123456');
 });

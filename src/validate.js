@@ -39,11 +39,13 @@ function email(v) {
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
-function dateParam(v, field) {
+// Data "AAAA-MM-DD" → início do dia NO FUSO informado (o da empresa). Antes era o fuso do servidor (UTC),
+// o que deslocava os filtros em 3 horas: uma resposta de domingo à noite caía na segunda.
+function dateParam(v, field, tz) {
   if (v === undefined || v === '') return null;
   if (typeof v !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(v)) throw bad(`Data "${field}" inválida.`);
-  const t = Date.parse(v + 'T00:00:00');
-  if (Number.isNaN(t)) throw bad(`Data "${field}" inválida.`);
+  const t = require('./time').parseLocal(v + 'T00:00', tz || undefined);
+  if (t === null) throw bad(`Data "${field}" inválida.`);
   return t;
 }
 

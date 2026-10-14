@@ -27,8 +27,10 @@ const CONTACT_MODES = { never: 'Não perguntar', detractors: 'Só para quem deu 
 const parseJson = (v, fallback) => { try { return v ? JSON.parse(v) : fallback; } catch { return fallback; } };
 function parseOptions(q) { return parseJson(q.options_json, []); }
 
-function loadSurvey(surveyId) {
-  const s = get('SELECT * FROM surveys WHERE id = ?', surveyId);
+// Sempre com a empresa: uma pesquisa de outra empresa é tratada como inexistente.
+function loadSurvey(surveyId, companyId) {
+  if (!companyId) throw new Error('loadSurvey exige a empresa.');
+  const s = get('SELECT * FROM surveys WHERE id = ? AND company_id = ?', surveyId, companyId);
   if (!s) return null;
   s.languages = parseJson(s.languages, ['pt']).filter((l) => LANGS.includes(l));
   if (!s.languages.includes('pt')) s.languages.unshift('pt');

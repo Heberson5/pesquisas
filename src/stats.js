@@ -1,24 +1,33 @@
 'use strict';
 const { UFS } = require('./geo');
 // Estatísticas e relatório: usados pelo painel, pela exportação PowerPoint e pelo relatório semanal por e-mail.
-// O escopo do usuário (admin: todas as filiais; gestor: as dele) é aplicado em todas as consultas.
+// Toda consulta é filtrada pela EMPRESA em uso e pelo escopo do usuário (gestor: só as unidades dele).
+// As datas do filtro valem no fuso da empresa.
 const { get, all } = require('./db');
-const { bad, id, dateParam } = require('./validate');
+const { HttpError, bad, id, dateParam } = require('./validate');
 const { scope, assertBranch, placeholders } = require('./scope');
 const { loadSurvey, npsFromCounts } = require('./surveys');
 const { getSettings } = require('./settings');
 const { buildReport } = require('./report');
-const { MEDIA_DIR } = require('./db');
+const { companyTz } = require('./companies');
+const { offsetMs } = require('./time');
+const { mediaPath } = require('./media');
 
 // Monta o filtro comum (período, filial, pesquisa) respeitando o escopo do usuário.
 function responseFilter(user, q) {
-  const where = [];
-  const params = [];
-  const from = dateParam(q.from, 'de');
-  const to = dateParam(q.to, 'até');
+  if (!user.companyId) throw new Error('Filtro sem empresa.');
+  const where = ['r.company_id = ?'];
+  const params = [user.companyId];
+  const tz = companyTz(user.companyId);
+  const from = dateParam(q.from, 'de', tz);
+  const to = dateParam(q.to, 'até', tz);
   if (from !== null) { where.push('r.submitted_at >= ?'); params.push(from); }
   if (to !== null) { where.push('r.submitted_at < ?'); params.push(to + 86_400_000); }
-  if (q.surveyId) { where.push('r.survey_id = ?'); params.push(id(q.surveyId, 'pesquisa')); }
+  if (q.surveyId) {
+    const sid = id(q.surveyId, 'pesquisa');
+    if (!get('SELECT 1 FROM surveys WHERE id = ? AND company_id = ?', sid, user.companyId)) throw new HttpError(404, 'Pesquisa não encontrada.');
+    where.push('r.survey_id = ?'); params.push(sid);
+  }
   if (q.channel) { if (!['tablet', 'link'].includes(q.channel)) throw bad('Canal inválido.'); where.push('r.channel = ?'); params.push(q.channel); }
   if (q.branchId) {
     const bid = id(q.branchId, 'filial');
@@ -33,7 +42,7 @@ function responseFilter(user, q) {
   }
   const s = scope(user);
   if (s) { where.push(s.length ? `r.branch_id IN (${placeholders(s)})` : '0'); params.push(...s); }
-  return { sql: where.length ? 'WHERE ' + where.join(' AND ') : '', params };
+  return { sql: 'WHERE ' + where.join(' AND '), params, tz };
 }
 
 const NPS_AGG = `SUM(CASE WHEN a.value_num >= 9 THEN 1 ELSE 0 END) AS promoters,
@@ -46,7 +55,7 @@ function computeStats(user, query) {
   const f = responseFilter(user, query);
   const totalResponses = get(`SELECT COUNT(*) AS n FROM responses r ${f.sql}`, ...f.params).n;
   const overall = npsRow(get(`SELECT ${NPS_AGG} FROM responses r ${NPS_JOIN} ${f.sql}`, ...f.params));
-  const defaultGoal = getSettings().defaultNpsGoal;
+  const defaultGoal = getSettings(user.companyId).defaultNpsGoal;
   const byBranch = all(`SELECT b.id, b.name, b.nps_goal, COUNT(DISTINCT r.id) AS responses, ${NPS_AGG}
       FROM responses r JOIN branches b ON b.id = r.branch_id
       LEFT JOIN answers a ON a.response_id = r.id AND a.question_id IN (SELECT id FROM questions WHERE is_nps = 1)
@@ -61,9 +70,10 @@ function computeStats(user, query) {
   const byQuestion = all(`SELECT q.id, q.text, s.title AS survey, ${NPS_AGG}
       FROM responses r ${NPS_JOIN} JOIN surveys s ON s.id = q.survey_id ${f.sql} GROUP BY q.id ORDER BY s.title, q.position`, ...f.params)
     .map((r) => ({ id: r.id, text: r.text, survey: r.survey, ...npsRow(r) }));
-  const trend = all(`SELECT date(r.submitted_at / 1000, 'unixepoch', 'localtime') AS day, COUNT(DISTINCT r.id) AS responses, ${NPS_AGG}
+  // Dia no fuso da empresa (não no do servidor).
+  const trend = all(`SELECT date((r.submitted_at + ?) / 1000, 'unixepoch') AS day, COUNT(DISTINCT r.id) AS responses, ${NPS_AGG}
       FROM responses r LEFT JOIN answers a ON a.response_id = r.id AND a.question_id IN (SELECT id FROM questions WHERE is_nps = 1)
-      ${f.sql} GROUP BY day ORDER BY day`, ...f.params)
+      ${f.sql} GROUP BY day ORDER BY day`, offsetMs(Date.now(), f.tz), ...f.params)
     .map((r) => ({ day: r.day, responses: r.responses, nps: npsRow(r).nps }));
   const scoreDist = all(`SELECT a.value_num AS score, COUNT(*) AS n FROM responses r ${NPS_JOIN} ${f.sql} GROUP BY a.value_num`, ...f.params);
   const comments = all(`SELECT r.submitted_at, b.name AS branch, q.text AS question, a.value_text AS comment
@@ -71,7 +81,7 @@ function computeStats(user, query) {
       JOIN branches b ON b.id = r.branch_id ${f.sql} ORDER BY r.submitted_at DESC LIMIT 15`, ...f.params);
   const channels = all(`SELECT r.channel, COUNT(*) AS n FROM responses r ${f.sql} GROUP BY r.channel`, ...f.params);
   // Regiões de onde vieram as respostas do QR/link (somente quem autorizou a localização).
-  const geoWhere = `${f.sql ? f.sql + ' AND' : 'WHERE'} r.geo_region IS NOT NULL`;
+  const geoWhere = `${f.sql} AND r.geo_region IS NOT NULL`;
   const geoJoin = 'LEFT JOIN answers a ON a.response_id = r.id AND a.question_id IN (SELECT id FROM questions WHERE is_nps = 1)';
   const byRegion = all(`SELECT COALESCE(r.geo_uf, r.geo_region) AS place, r.geo_region AS region, COUNT(DISTINCT r.id) AS responses, ${NPS_AGG}
       FROM responses r ${geoJoin} ${geoWhere} GROUP BY place, region ORDER BY responses DESC LIMIT 30`, ...f.params)
@@ -79,7 +89,7 @@ function computeStats(user, query) {
   const byCity = all(`SELECT r.geo_city AS city, r.geo_uf AS uf, COUNT(DISTINCT r.id) AS responses, ${NPS_AGG}
       FROM responses r ${geoJoin} ${geoWhere} AND r.geo_city IS NOT NULL GROUP BY city, uf ORDER BY responses DESC LIMIT 10`, ...f.params)
     .map((r) => ({ city: r.city, uf: r.uf, responses: r.responses, ...npsRow(r) }));
-  const linkNoGeo = get(`SELECT COUNT(*) AS n FROM responses r ${f.sql ? f.sql + ' AND' : 'WHERE'} r.channel = 'link' AND r.geo_region IS NULL`, ...f.params).n;
+  const linkNoGeo = get(`SELECT COUNT(*) AS n FROM responses r ${f.sql} AND r.channel = 'link' AND r.geo_region IS NULL`, ...f.params).n;
   return { totalResponses, overall, byBranch, ranking, defaultGoal, byQuestion, trend, scoreDist, comments, channels, byRegion, byCity, linkNoGeo };
 }
 
@@ -107,10 +117,11 @@ async function reportFor(user, query, generatedBy) {
   const f = responseFilter(user, query);
   const surveyIds = query.surveyId ? [id(query.surveyId, 'pesquisa')]
     : all(`SELECT r.survey_id, COUNT(*) AS n FROM responses r ${f.sql} GROUP BY r.survey_id ORDER BY n DESC LIMIT 3`, ...f.params).map((r) => r.survey_id);
-  const surveys = surveyIds.map(loadSurvey).filter(Boolean).map((s) => ({ title: s.title, questions: computeBreakdown(user, s, query) }));
-  const branchName = query.branchId ? get('SELECT name FROM branches WHERE id = ?', id(query.branchId, 'filial'))?.name : null;
+  const surveys = surveyIds.map((sid) => loadSurvey(sid, user.companyId)).filter(Boolean).map((s) => ({ title: s.title, questions: computeBreakdown(user, s, query) }));
+  const branchName = query.branchId ? get('SELECT name FROM branches WHERE id = ? AND company_id = ?', id(query.branchId, 'filial'), user.companyId)?.name : null;
+  const settings = getSettings(user.companyId);
   const buffer = await buildReport({
-    settings: getSettings(), stats, surveys, mediaDir: MEDIA_DIR,
+    settings, stats, surveys, logoFile: settings.logoMediaId ? mediaPath({ id: settings.logoMediaId, company_id: user.companyId }) : null,
     filters: { from: query.from || null, to: query.to || null, branch: branchName, survey: query.surveyId ? surveys[0]?.title : null },
     generatedBy,
   });

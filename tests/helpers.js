@@ -14,8 +14,15 @@ process.env.DISABLE_JOBS = 'true';
 
 const app = require('../server');
 const { run, get } = require('../src/db');
-// Os testes antigos rodam sem 2FA obrigatório; os testes de 2FA ligam explicitamente.
-run("INSERT INTO settings (key, value) VALUES ('requireAdminMfa', 'false') ON CONFLICT(key) DO UPDATE SET value = excluded.value");
+const { setPlatform } = require('../src/settings');
+const { createCompany } = require('../src/companies');
+// Os testes antigos rodam sem 2FA obrigatório (inclusive o do Master); os testes de 2FA ligam explicitamente.
+setPlatform('companyDefaults', { requireAdminMfa: false });
+setPlatform('security', { masterMfa: false });
+// Empresa padrão dos testes (a primeira); outras empresas são criadas com newCompany().
+const COMPANY = createCompany({ name: 'Empresa Teste', status: 'active' });
+let companySeq = 0;
+const newCompany = (name = `Outra Empresa ${++companySeq}`) => createCompany({ name, status: 'active' });
 const { hashPassword } = require('../src/security');
 
 let server;
@@ -55,10 +62,12 @@ class Client {
   }
 }
 
-function makeUser(email, role, password = 'SenhaForte123', branches = []) {
-  const id = run('INSERT INTO users (name, email, password_hash, role, created_at) VALUES (?,?,?,?,?)', email, email, hashPassword(password), role, Date.now()).lastInsertRowid;
+// role 'master' não pertence a empresa nenhuma; os demais ficam na empresa padrão (ou na informada).
+function makeUser(email, role, password = 'SenhaForte123', branches = [], { companyId = COMPANY, permissions = null } = {}) {
+  const id = run('INSERT INTO users (company_id, name, email, password_hash, role, permissions, created_at) VALUES (?,?,?,?,?,?,?)',
+    role === 'master' ? null : companyId, email, email, hashPassword(password), role, permissions ? JSON.stringify(permissions) : null, Date.now()).lastInsertRowid;
   for (const b of branches) run('INSERT INTO user_branches (user_id, branch_id) VALUES (?,?)', id, b);
   return Number(id);
 }
 
-module.exports = { start, stop, Client, makeUser, freshIp, run, get, base: () => base };
+module.exports = { start, stop, Client, makeUser, freshIp, run, get, base: () => base, COMPANY, newCompany };

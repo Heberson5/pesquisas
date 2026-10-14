@@ -1,48 +1,62 @@
 'use strict';
 // Configuração de envio (e-mail SMTP e WhatsApp da Meta) feita pelo painel.
 // Senha do SMTP e token do WhatsApp ficam criptografados no banco (AES-256-GCM) e NUNCA voltam ao navegador:
-// a tela só recebe "senha cadastrada: sim/não". Sem configuração no painel, vale o que estiver no .env (SMTP_*, WHATSAPP_*).
+// a tela só recebe "senha cadastrada: sim/não".
+// Ordem: configuração da EMPRESA (chave da empresa) > padrão da PLATAFORMA (Master) > variáveis do .env (SMTP_*, WHATSAPP_*).
+// companyId = null significa a configuração da própria plataforma.
 const dns = require('node:dns').promises;
 const net = require('node:net');
 const config = require('./config');
 const { get, run } = require('./db');
 const { encrypt, decrypt } = require('./vault');
+const companies = require('./companies');
 const { bad } = require('./validate');
 
 const KEY = 'delivery';
 const SMTP_PORTS = [25, 465, 587, 2525];
 const HOST_RE = /^(?=.{1,253}$)([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/i;
 
-function stored() {
-  const row = get('SELECT value FROM settings WHERE key = ?', KEY);
+function stored(companyId) {
+  const row = companyId ? get('SELECT value FROM company_settings WHERE company_id = ? AND key = ?', companyId, KEY)
+    : get('SELECT value FROM platform_settings WHERE key = ?', KEY);
   try { return row ? JSON.parse(row.value) : {}; } catch { return {}; }
 }
-const write = (v) => run('INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value', KEY, JSON.stringify(v));
-const dec = (v) => { try { return v ? decrypt(v) : ''; } catch { return ''; } };
+const write = (companyId, v) => (companyId
+  ? run('INSERT INTO company_settings (company_id, key, value) VALUES (?, ?, ?) ON CONFLICT(company_id, key) DO UPDATE SET value = excluded.value', companyId, KEY, JSON.stringify(v))
+  : run('INSERT INTO platform_settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value', KEY, JSON.stringify(v)));
+// Segredos da empresa usam a chave da empresa; os da plataforma, a chave da plataforma.
+const enc = (companyId, v) => (companyId ? companies.encryptFor(companyId, v) : encrypt(v));
+const dec = (companyId, v) => { try { return v ? (companyId ? companies.decryptFor(companyId, v) : decrypt(v)) || '' : ''; } catch { return ''; } };
 
-// Configuração em uso (painel tem prioridade sobre o .env).
-function smtp() {
-  const s = stored().smtp;
-  if (s?.host) {
-    return { source: 'painel', host: s.host, port: s.port, secure: !!s.secure, from: s.from,
-      auth: s.user ? { user: s.user, pass: dec(s.passEnc) } : undefined };
-  }
+const smtpFrom = (companyId, s, source) => ({ source, host: s.host, port: s.port, secure: !!s.secure, from: s.from,
+  auth: s.user ? { user: s.user, pass: dec(companyId, s.passEnc) } : undefined });
+
+// Configuração em uso para uma empresa (ou para a plataforma, com companyId = null).
+function smtp(companyId = null) {
+  const own = companyId ? stored(companyId).smtp : null;
+  if (own?.host) return smtpFrom(companyId, own, 'empresa');
+  const plat = stored(null).smtp;
+  if (plat?.host) return smtpFrom(null, plat, companyId ? 'plataforma' : 'painel');
   return config.smtp ? { ...config.smtp, source: 'servidor' } : null;
 }
-function whatsapp() {
-  const w = stored().whatsapp;
-  if (w?.phoneId && w.tokenEnc) return { source: 'painel', phoneId: w.phoneId, token: dec(w.tokenEnc) };
+function whatsapp(companyId = null) {
+  const own = companyId ? stored(companyId).whatsapp : null;
+  if (own?.phoneId && own.tokenEnc) return { source: 'empresa', phoneId: own.phoneId, token: dec(companyId, own.tokenEnc) };
+  const plat = stored(null).whatsapp;
+  if (plat?.phoneId && plat.tokenEnc) return { source: companyId ? 'plataforma' : 'painel', phoneId: plat.phoneId, token: dec(null, plat.tokenEnc) };
   return config.whatsapp ? { ...config.whatsapp, source: 'servidor' } : null;
 }
 
-// Visão para a tela: sem segredos.
-function publicView() {
-  const s = stored(); const sm = smtp(); const wa = whatsapp();
+// Visão para a tela: sem segredos. Mostra o que a empresa configurou e o que está em uso (pode ser o padrão da plataforma).
+function publicView(companyId = null) {
+  const s = stored(companyId); const sm = smtp(companyId); const wa = whatsapp(companyId);
+  // Para a empresa, só aparecem os dados que ELA cadastrou; do padrão da plataforma, só "em uso: plataforma".
+  const own = companyId ? { smtp: s.smtp || null, wa: s.whatsapp || null } : { smtp: s.smtp || (sm ? { host: sm.host, port: sm.port, secure: sm.secure, user: sm.auth?.user, from: sm.from } : null), wa: s.whatsapp || (wa ? { phoneId: wa.phoneId } : null) };
   return {
-    smtp: { configured: !!sm, source: sm?.source || null, host: s.smtp?.host || sm?.host || '', port: s.smtp?.port || sm?.port || 587,
-      secure: s.smtp ? !!s.smtp.secure : !!sm?.secure, user: s.smtp?.user ?? sm?.auth?.user ?? '', from: s.smtp?.from || sm?.from || '',
-      passwordSet: !!(s.smtp?.passEnc || sm?.auth?.pass) },
-    whatsapp: { configured: !!wa, source: wa?.source || null, phoneId: s.whatsapp?.phoneId || wa?.phoneId || '', tokenSet: !!(s.whatsapp?.tokenEnc || wa?.token) },
+    smtp: { configured: !!sm, source: sm?.source || null, host: own.smtp?.host || '', port: own.smtp?.port || 587,
+      secure: !!own.smtp?.secure, user: own.smtp?.user || '', from: own.smtp?.from || '',
+      passwordSet: companyId ? !!s.smtp?.passEnc : !!(s.smtp?.passEnc || sm?.auth?.pass) },
+    whatsapp: { configured: !!wa, source: wa?.source || null, phoneId: own.wa?.phoneId || '', tokenSet: companyId ? !!s.whatsapp?.tokenEnc : !!(s.whatsapp?.tokenEnc || wa?.token) },
   };
 }
 
@@ -65,9 +79,9 @@ async function resolvePublic(host) {
 }
 
 // Valida e grava. Campos em branco mantêm o valor atual (senha/token nunca precisam ser digitados de novo).
-async function save(input) {
+async function save(companyId, input) {
   if (!input || typeof input !== 'object' || Array.isArray(input)) throw bad('Dados inválidos.');
-  const cur = stored(); const next = { ...cur };
+  const cur = stored(companyId); const next = { ...cur };
   const str = (v, field, max) => { if (typeof v !== 'string') throw bad(`Valor de ${field} inválido.`); const t = v.trim(); if (t.length > max || /[\r\n\0]/.test(t)) throw bad(`Valor de ${field} inválido.`); return t; };
 
   if (input.smtp !== undefined) {
@@ -88,7 +102,7 @@ async function save(input) {
       let passEnc = prev.passEnc || null;
       if (s.password !== undefined && s.password !== '') {
         if (typeof s.password !== 'string' || s.password.length > 300 || /[\r\n\0]/.test(s.password)) throw bad('Senha inválida.');
-        passEnc = encrypt(s.password);
+        passEnc = enc(companyId, s.password);
       }
       if (user && !passEnc) throw bad('Informe a senha do e-mail.');
       await resolvePublic(host);
@@ -106,14 +120,14 @@ async function save(input) {
       let tokenEnc = prev.tokenEnc || null;
       if (w.token !== undefined && w.token !== '') {
         if (typeof w.token !== 'string' || !/^[A-Za-z0-9_\-.=]{20,600}$/.test(w.token.trim())) throw bad('Token do WhatsApp inválido.');
-        tokenEnc = encrypt(w.token.trim());
+        tokenEnc = enc(companyId, w.token.trim());
       }
       if (!tokenEnc) throw bad('Informe o token de acesso do WhatsApp.');
       next.whatsapp = { phoneId, tokenEnc };
     }
   }
-  write(next);
-  return publicView();
+  write(companyId, next);
+  return publicView(companyId);
 }
 
 module.exports = { smtp, whatsapp, publicView, save, resolvePublic, isPrivateOrLocal };

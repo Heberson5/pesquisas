@@ -4,7 +4,8 @@ const express = require('express');
 const { securityHeaders } = require('./src/security');
 const { HttpError } = require('./src/validate');
 const { get } = require('./src/db');
-const { getSettings, publicBranding } = require('./src/settings');
+const { getSettings, publicBranding, platformBranding } = require('./src/settings');
+const { mediaPath } = require('./src/media');
 
 const app = express();
 app.disable('x-powered-by');
@@ -20,43 +21,53 @@ app.get('/healthz', (req, res) => {
 });
 app.use('/api', express.json({ limit: '64kb', strict: true }));
 
-// Identidade visual pública (tela de login e tablet). Não expõe nada sensível.
-app.get('/api/public/branding', (req, res) => res.json(publicBranding()));
+// Empresa pelo endereço curto (?empresa=slug), usado no ícone e no app instalado do tablet.
+const companyBySlug = (slug) => (typeof slug === 'string' && /^[a-z0-9-]{2,60}$/.test(slug)
+  ? get("SELECT id FROM companies WHERE slug = ? AND status NOT IN ('canceled')", slug) : null);
+
+// Identidade visual pública (tela de login e tablet). Sem empresa: a marca da plataforma. Não expõe nada sensível.
+app.get('/api/public/branding', (req, res) => {
+  const c = companyBySlug(req.query.empresa);
+  res.json(c ? publicBranding(c.id) : platformBranding());
+});
 app.use('/api/kiosk', require('./src/routes/kiosk'));
 app.use('/api/link', require('./src/routes/link'));
 app.use('/api/admin', require('./src/routes/auth'));
 app.use('/api/admin/cases', require('./src/routes/cases'));
 app.use('/api/admin/privacy', require('./src/routes/privacy'));
-app.use('/api/admin', require('./src/routes/admin'));
+app.use('/api/admin', require('./src/routes/panel'));
 app.use('/api', (req, res) => res.status(404).json({ error: 'Rota não encontrada.' }));
 
-// Mídia de agradecimento: nomes aleatórios de 128 bits, tipo validado no upload.
-const { MEDIA_DIR } = require('./src/db');
+// Mídia (logo, ícones, agradecimento): nomes aleatórios de 128 bits, tipo validado no upload,
+// arquivo guardado na pasta da empresa dona.
+const mediaRow = (id) => (typeof id === 'string' && /^[a-f0-9]{32}$/.test(id) ? get('SELECT id, mime, company_id FROM media WHERE id = ? /* tenant-ok: id aleatório público */', id) : null);
 app.get('/media/:id', (req, res, next) => {
-  if (!/^[a-f0-9]{32}$/.test(req.params.id)) return res.status(404).end();
-  const m = get('SELECT id, mime FROM media WHERE id = ?', req.params.id);
+  const m = mediaRow(req.params.id);
   if (!m) return res.status(404).end();
-  res.sendFile(path.join(MEDIA_DIR, m.id), {
+  res.sendFile(mediaPath(m), {
     headers: { 'Content-Type': m.mime, 'Content-Disposition': 'inline', 'Cache-Control': 'public, max-age=86400, immutable' },
   }, (err) => err && next(err));
 });
 
-// Ícones configuráveis: navegador (favicon) e aplicativo instalado no tablet.
+// Ícones configuráveis: navegador (favicon) e aplicativo instalado no tablet — da empresa (?empresa=slug) ou o padrão.
 function sendIcon(res, next, mediaId) {
-  const m = mediaId ? get('SELECT id, mime FROM media WHERE id = ?', mediaId) : null;
+  const m = mediaRow(mediaId);
   if (!m) return res.sendFile(path.join(__dirname, 'public', 'kiosk', 'icon.svg'), { headers: { 'Cache-Control': 'no-cache' } }, (e) => e && next(e));
-  res.sendFile(path.join(MEDIA_DIR, m.id), { headers: { 'Content-Type': m.mime, 'Cache-Control': 'no-cache' } }, (e) => e && next(e));
+  res.sendFile(mediaPath(m), { headers: { 'Content-Type': m.mime, 'Cache-Control': 'no-cache' } }, (e) => e && next(e));
 }
-app.get(['/favicon.ico', '/favicon'], (req, res, next) => sendIcon(res, next, getSettings().faviconMediaId));
-app.get(['/app-icon', '/apple-touch-icon.png'], (req, res, next) => sendIcon(res, next, getSettings().appIconMediaId));
+const settingsBySlug = (slug) => { const c = companyBySlug(slug); return c ? getSettings(c.id) : null; };
+app.get(['/favicon.ico', '/favicon'], (req, res, next) => sendIcon(res, next, settingsBySlug(req.query.empresa)?.faviconMediaId));
+app.get(['/app-icon', '/apple-touch-icon.png'], (req, res, next) => sendIcon(res, next, settingsBySlug(req.query.empresa)?.appIconMediaId));
 app.get('/kiosk/manifest.webmanifest', (req, res) => {
-  const s = getSettings();
-  const icon = s.appIconMediaId ? get('SELECT mime FROM media WHERE id = ?', s.appIconMediaId) : null;
+  const c = companyBySlug(req.query.empresa);
+  const s = c ? getSettings(c.id) : platformBranding();
+  const icon = s.appIconMediaId ? mediaRow(s.appIconMediaId) : null;
+  const q = c ? `?empresa=${encodeURIComponent(req.query.empresa)}` : '';
   res.type('application/manifest+json').set('Cache-Control', 'no-cache').send(JSON.stringify({
-    name: s.companyName, short_name: s.companyName.slice(0, 12), start_url: '/kiosk/', scope: '/kiosk/',
+    name: s.companyName, short_name: s.companyName.slice(0, 12), start_url: '/kiosk/' + q, scope: '/kiosk/',
     display: 'fullscreen', orientation: 'any', background_color: s.primaryColor, theme_color: s.primaryColor,
     icons: icon
-      ? [{ src: '/app-icon', sizes: '512x512', type: icon.mime, purpose: 'any' }, { src: '/app-icon', sizes: '192x192', type: icon.mime, purpose: 'any' }]
+      ? [{ src: '/app-icon' + q, sizes: '512x512', type: icon.mime, purpose: 'any' }, { src: '/app-icon' + q, sizes: '192x192', type: icon.mime, purpose: 'any' }]
       : [{ src: '/kiosk/icon.svg', sizes: 'any', type: 'image/svg+xml', purpose: 'any' }],
   }));
 });
@@ -78,7 +89,7 @@ app.use((req, res) => res.status(404).type('text/plain').send('Não encontrado')
 // Tratamento de erros: nunca devolve stack trace nem detalhes internos ao cliente.
 // eslint-disable-next-line no-unused-vars
 app.use((err, req, res, next) => {
-  if (err instanceof HttpError) return res.status(err.status).json({ error: err.message });
+  if (err instanceof HttpError) return res.status(err.status).json(err.code ? { error: err.message, code: err.code } : { error: err.message });
   if (err.type === 'entity.too.large') return res.status(413).json({ error: 'Conteúdo grande demais.' });
   if (err.type === 'entity.parse.failed') return res.status(400).json({ error: 'JSON inválido.' });
   if (err.status === 404 || err.code === 'ENOENT') return res.status(404).end();

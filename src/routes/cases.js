@@ -1,33 +1,35 @@
 'use strict';
 // Tratamento de clientes insatisfeitos: cada nota de NPS de 0 a 6 vira um caso com status,
-// responsável e histórico. Gestor só vê e altera casos das próprias filiais.
+// responsável e histórico. Sempre dentro da empresa em uso; gestor só vê e altera casos das próprias unidades.
 const express = require('express');
-const { get, all, run, tx, audit } = require('../db');
-const { requireUser } = require('../auth');
+const { get, all, run, tx, auditReq } = require('../db');
+const { requireUser, requireCompany, requirePerm } = require('../auth');
+const { P } = require('../permissions');
 const { HttpError, bad, str, int, id, dateParam } = require('../validate');
 const { scope, assertBranch, placeholders } = require('../scope');
-const { decrypt } = require('../vault');
+const { decryptFor, companyTz } = require('../companies');
 
 const router = express.Router();
-router.use(requireUser);
+router.use(requireUser, requireCompany, requirePerm(P.CASES));
 
 const STATUS = { aberto: 'Aberto', em_contato: 'Em contato', resolvido: 'Resolvido', sem_retorno: 'Sem retorno' };
 const CLOSED = new Set(['resolvido', 'sem_retorno']);
 
 function caseFilter(user, q) {
-  const where = []; const params = [];
+  const where = ['c.company_id = ?']; const params = [user.companyId];
   if (q.status) {
     if (!Object.hasOwn(STATUS, q.status) && q.status !== 'pendentes') throw bad('Status inválido.');
     if (q.status === 'pendentes') where.push("c.status IN ('aberto','em_contato')"); else { where.push('c.status = ?'); params.push(q.status); }
   }
-  if (q.branchId) { const b = id(q.branchId, 'filial'); assertBranch(user, b); where.push('c.branch_id = ?'); params.push(b); }
-  const from = dateParam(q.from, 'de'); const to = dateParam(q.to, 'até');
+  if (q.branchId) { const b = id(q.branchId, 'unidade'); assertBranch(user, b); where.push('c.branch_id = ?'); params.push(b); }
+  const tz = companyTz(user.companyId);
+  const from = dateParam(q.from, 'de', tz); const to = dateParam(q.to, 'até', tz);
   if (from !== null) { where.push('c.created_at >= ?'); params.push(from); }
   if (to !== null) { where.push('c.created_at < ?'); params.push(to + 86_400_000); }
   if (q.mine === '1') { where.push('c.assignee_id = ?'); params.push(user.id); }
   const s = scope(user);
   if (s) { where.push(s.length ? `c.branch_id IN (${placeholders(s)})` : '0'); params.push(...s); }
-  return { sql: where.length ? 'WHERE ' + where.join(' AND ') : '', params };
+  return { sql: 'WHERE ' + where.join(' AND '), params };
 }
 
 router.get('/summary', (req, res) => {
@@ -55,21 +57,22 @@ router.get('/', (req, res) => {
 });
 
 function loadCase(user, caseId) {
-  const c = get('SELECT * FROM cases WHERE id = ?', caseId);
+  const c = get('SELECT * FROM cases WHERE id = ? AND company_id = ?', caseId, user.companyId);
   if (!c) throw new HttpError(404, 'Caso não encontrado.');
   const s = scope(user);
   if (s && !s.includes(c.branch_id)) throw new HttpError(404, 'Caso não encontrado.');
   return c;
 }
 
-// Pessoas que podem ser responsáveis por um caso da filial: admins e gestores da filial.
-const assignable = (branchId) => all(`SELECT DISTINCT u.id, u.name FROM users u LEFT JOIN user_branches ub ON ub.user_id = u.id
-  WHERE u.active = 1 AND (u.role = 'admin' OR ub.branch_id = ?) ORDER BY u.name`, branchId);
+// Pessoas que podem ser responsáveis por um caso da unidade: administradores da empresa e gestores da unidade.
+const assignable = (companyId, branchId) => all(`SELECT DISTINCT u.id, u.name FROM users u LEFT JOIN user_branches ub ON ub.user_id = u.id
+  WHERE u.company_id = ? AND u.active = 1 AND (u.role = 'admin' OR ub.branch_id = ?) ORDER BY u.name`, companyId, branchId);
 
 router.get('/:id', (req, res) => {
+  const cid = req.user.companyId;
   const c = loadCase(req.user, id(req.params.id));
   const r = get(`SELECT r.*, b.name AS branch, s.title AS survey, d.name AS device FROM responses r JOIN branches b ON b.id = r.branch_id
-    JOIN surveys s ON s.id = r.survey_id LEFT JOIN devices d ON d.id = r.device_id WHERE r.id = ?`, c.response_id);
+    JOIN surveys s ON s.id = r.survey_id LEFT JOIN devices d ON d.id = r.device_id WHERE r.id = ? AND r.company_id = ?`, c.response_id, cid);
   const answers = all(`SELECT q.text, q.type, q.is_nps, a.value_num, a.value_text FROM answers a JOIN questions q ON q.id = a.question_id
     WHERE a.response_id = ? ORDER BY q.position`, r.id).map((a) => ({
     question: a.text, is_nps: !!a.is_nps,
@@ -77,13 +80,13 @@ router.get('/:id', (req, res) => {
   }));
   let contact = null;
   if (r.contact_consent_at && !r.anonymized_at) {
-    contact = { name: decrypt(r.contact_name_enc), phone: decrypt(r.contact_phone_enc), email: decrypt(r.contact_email_enc), consentAt: r.contact_consent_at };
-    audit(req.user.id, 'contact.view', { caseId: c.id }, req.ip); // acesso a dado pessoal fica registrado
+    contact = { name: decryptFor(cid, r.contact_name_enc), phone: decryptFor(cid, r.contact_phone_enc), email: decryptFor(cid, r.contact_email_enc), consentAt: r.contact_consent_at };
+    auditReq(req, 'contact.view', { caseId: c.id }, c.branch_id); // acesso a dado pessoal fica registrado
   }
   const notes = all(`SELECT n.at, n.text, n.status_from, n.status_to, u.name AS user FROM case_notes n LEFT JOIN users u ON u.id = n.user_id
-    WHERE n.case_id = ? ORDER BY n.at`, c.id);
+    WHERE n.case_id = ? ORDER BY n.at /* tenant-ok: anotações de um caso já validado na empresa */`, c.id);
   res.json({ ...c, branch: r.branch, survey: r.survey, device: r.device, channel: r.channel, submitted_at: r.submitted_at,
-    answers, contact, notes, statuses: STATUS, assignable: assignable(c.branch_id) });
+    answers, contact, notes, statuses: STATUS, assignable: assignable(cid, c.branch_id) });
 });
 
 router.put('/:id', (req, res) => {
@@ -94,18 +97,18 @@ router.put('/:id', (req, res) => {
   let assignee = c.assignee_id;
   if (b.assigneeId !== undefined) {
     assignee = b.assigneeId === null ? null : id(b.assigneeId, 'responsável');
-    if (assignee !== null && !assignable(c.branch_id).some((u) => u.id === assignee)) throw bad('Responsável sem acesso a esta filial.');
+    if (assignee !== null && !assignable(req.user.companyId, c.branch_id).some((u) => u.id === assignee)) throw bad('Responsável sem acesso a esta unidade.');
   }
   const note = str(b.note, { field: 'anotação', max: 2000, optional: true });
   if (status === c.status && assignee === c.assignee_id && !note) throw bad('Nada para atualizar.');
   const now = Date.now();
   tx(() => {
-    run('UPDATE cases SET status = ?, assignee_id = ?, updated_at = ?, resolved_at = ? WHERE id = ?',
-      status, assignee, now, CLOSED.has(status) ? (c.resolved_at || now) : null, c.id);
+    run('UPDATE cases SET status = ?, assignee_id = ?, updated_at = ?, resolved_at = ? WHERE id = ? AND company_id = ?',
+      status, assignee, now, CLOSED.has(status) ? (c.resolved_at || now) : null, c.id, req.user.companyId);
     run('INSERT INTO case_notes (case_id, user_id, at, text, status_from, status_to) VALUES (?,?,?,?,?,?)',
       c.id, req.user.id, now, note, status !== c.status ? c.status : null, status !== c.status ? status : null);
   });
-  audit(req.user.id, 'case.update', { id: c.id, status, assignee }, req.ip);
+  auditReq(req, 'case.update', { id: c.id, status, assignee }, c.branch_id);
   res.json({ ok: true });
 });
 

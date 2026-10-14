@@ -2,7 +2,7 @@
 // Testes de ataque: 2FA (TOTP), códigos de recuperação e recuperação de senha por e-mail.
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { start, stop, Client, makeUser, run, get } = require('./helpers');
+const { start, stop, Client, makeUser, run, get, COMPANY } = require('./helpers');
 const totp = require('../src/totp');
 
 const PW = 'SenhaForte123';
@@ -87,7 +87,7 @@ test('2FA: desafio expira após 5 tentativas (força bruta no código)', async (
 });
 
 test('2FA obrigatório: admin sem 2FA só consegue configurar o 2FA', async () => {
-  run("UPDATE settings SET value = 'true' WHERE key = 'requireAdminMfa'");
+  run("INSERT INTO company_settings (company_id, key, value) VALUES (?, 'requireAdminMfa', 'true') ON CONFLICT(company_id, key) DO UPDATE SET value = excluded.value", COMPANY);
   const c = new Client(); const r = await c.login('obrig@t.local', PW);
   assert.equal(r.json.mfaSetupRequired, true);
   for (const [m, u] of [['GET', '/api/admin/cases'], ['POST', '/api/admin/privacy/search'], ['GET', '/api/admin/report.pptx'], ['GET', '/api/admin/stats'], ['GET', '/api/admin/users'], ['GET', '/api/admin/responses.csv'], ['PUT', '/api/admin/settings'], ['POST', '/api/admin/branches']]) {
@@ -100,7 +100,7 @@ test('2FA obrigatório: admin sem 2FA só consegue configurar o 2FA', async () =
   assert.equal((await c.req('GET', '/api/admin/stats')).status, 200);
   // com 2FA obrigatório, admin não pode desligar o próprio 2FA
   assert.equal((await c.req('POST', '/api/admin/mfa/disable', { body: { password: PW, code: now() } })).status, 403);
-  run("UPDATE settings SET value = 'false' WHERE key = 'requireAdminMfa'");
+  run("UPDATE company_settings SET value = 'false' WHERE company_id = ? AND key = 'requireAdminMfa'", COMPANY);
 });
 
 test('recuperação de senha: resposta não revela se o e-mail existe', async () => {

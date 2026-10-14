@@ -5,18 +5,21 @@ const { get, run, tx } = require('./db');
 const geoLib = require('./geo');
 const { HttpError, bad, int, str, UUID_RE } = require('./validate');
 const { loadSurvey, normalizeAnswer, isVisible, LANGS } = require('./surveys');
-const { encrypt, lookup, normPhone, normEmail } = require('./vault');
+const { normPhone, normEmail } = require('./vault');
+const { encryptFor, lookupFor, getCompany } = require('./companies');
 const { isEmail } = require('./notify');
 const { publicBranding } = require('./settings');
 const alerts = require('./alerts');
 const { timezone } = require('./config');
+const { mediaOf } = require('./media');
 
 // ---------------------------------------------------------------- pesquisa vigente (com campanhas agendadas)
 // A campanha mais recente que cobre o momento vence; sem campanha, vale a pesquisa padrão da filial.
+// Campanhas "todas as unidades" valem só para as unidades da MESMA empresa.
 function effectiveSurveyId(branch, at = Date.now()) {
-  const s = get(`SELECT s.survey_id FROM schedules s JOIN surveys v ON v.id = s.survey_id AND v.active = 1
-      WHERE (s.branch_id = ? OR s.branch_id IS NULL) AND s.starts_at <= ? AND s.ends_at > ?
-      ORDER BY s.starts_at DESC, s.id DESC LIMIT 1`, branch.id, at, at);
+  const s = get(`SELECT s.survey_id FROM schedules s JOIN surveys v ON v.id = s.survey_id AND v.active = 1 AND v.company_id = s.company_id
+      WHERE s.company_id = ? AND (s.branch_id = ? OR s.branch_id IS NULL) AND s.starts_at <= ? AND s.ends_at > ?
+      ORDER BY s.starts_at DESC, s.id DESC LIMIT 1`, branch.company_id, branch.id, at, at);
   return s ? s.survey_id : branch.survey_id;
 }
 
@@ -25,8 +28,8 @@ function surveyAllowed(branch, surveyId, submittedAt) {
   return [Date.now(), submittedAt, submittedAt - 60 * 60_000].some((t) => effectiveSurveyId(branch, t) === surveyId);
 }
 
-function mediaInfo(id) {
-  const m = id ? get('SELECT id, mime FROM media WHERE id = ?', id) : null;
+function mediaInfo(companyId, id) {
+  const m = mediaOf(companyId, id);
   return m ? { url: `/media/${m.id}`, kind: m.mime.startsWith('video/') ? 'video' : 'image' } : null;
 }
 
@@ -42,7 +45,7 @@ function surveyPayload(survey) {
     welcomeText: survey.welcome_text,
     thanksTitle: survey.thanks_title,
     thanksText: survey.thanks_text,
-    thanksMedia: mediaInfo(survey.thanks_media_id),
+    thanksMedia: mediaInfo(survey.company_id, survey.thanks_media_id),
     thanksSeconds: survey.thanks_seconds,
     idleSeconds: survey.idle_seconds,
     contactMode: survey.contact_mode,
@@ -80,7 +83,9 @@ function hoursStatus(branch, at = Date.now(), tz = timezone) {
 
 function buildConfig(branch, extra = {}, tz = timezone) {
   const sid = effectiveSurveyId(branch);
-  return { ...extra, ...hoursStatus(branch, Date.now(), tz), timezone: tz, branding: publicBranding(), branch: { name: branch.name }, survey: surveyPayload(sid ? loadSurvey(sid) : null) };
+  const company = getCompany(branch.company_id);
+  return { ...extra, ...hoursStatus(branch, Date.now(), tz), timezone: tz, branding: publicBranding(branch.company_id),
+    company: { slug: company.slug }, branch: { name: branch.name }, survey: surveyPayload(sid ? loadSurvey(sid, branch.company_id) : null) };
 }
 
 // ---------------------------------------------------------------- contato (LGPD)
@@ -114,7 +119,7 @@ function saveResponse({ branch, deviceId = null, deviceLabel = null, channel, bo
 
   // A filial vem do token (tablet) ou do link — nunca do corpo da requisição.
   if (!surveyAllowed(branch, surveyId, submittedAt)) throw new HttpError(409, 'A pesquisa desta filial mudou. Recarregando.');
-  const survey = loadSurvey(surveyId);
+  const survey = loadSurvey(surveyId, branch.company_id);
   if (!survey || !survey.active) throw new HttpError(409, 'Pesquisa indisponível.');
 
   if (!Array.isArray(body.answers) || body.answers.length > survey.questions.length) throw bad('Respostas inválidas.');
@@ -154,14 +159,16 @@ function saveResponse({ branch, deviceId = null, deviceLabel = null, channel, bo
   }
   const lang = typeof body.lang === 'string' && survey.languages.includes(body.lang) && LANGS.includes(body.lang) ? body.lang : null;
 
+  const cid = branch.company_id;
   const result = tx(() => {
-    if (get('SELECT 1 FROM responses WHERE uuid = ?', body.uuid.toLowerCase())) return { created: false };
-    const r = run(`INSERT INTO responses (uuid, survey_id, branch_id, device_id, started_at, submitted_at, received_at, channel, lang,
+    if (get('SELECT 1 FROM responses WHERE uuid = ? /* tenant-ok: uuid aleatório gerado pelo aparelho, único na plataforma */', body.uuid.toLowerCase())) return { created: false };
+    const r = run(`INSERT INTO responses (company_id, uuid, survey_id, branch_id, device_id, started_at, submitted_at, received_at, channel, lang,
         contact_name_enc, contact_phone_enc, contact_email_enc, contact_phone_lookup, contact_email_lookup, contact_consent_at, geo_lat, geo_lng, geo_city, geo_uf, geo_region, device_label)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-    body.uuid.toLowerCase(), survey.id, branch.id, deviceId, startedAt, submittedAt, now, channel, lang,
-    contact ? encrypt(contact.name) : null, contact ? encrypt(contact.phone) : null, contact ? encrypt(contact.email) : null,
-    contact?.phone ? lookup('phone:' + contact.phone) : null, contact?.email ? lookup('email:' + contact.email) : null, contact ? now : null,
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+    cid, body.uuid.toLowerCase(), survey.id, branch.id, deviceId, startedAt, submittedAt, now, channel, lang,
+    // Contato criptografado com a chave DA EMPRESA (outra empresa não consegue abrir nem buscar).
+    contact ? encryptFor(cid, contact.name) : null, contact ? encryptFor(cid, contact.phone) : null, contact ? encryptFor(cid, contact.email) : null,
+    contact?.phone ? lookupFor(cid, 'phone:' + contact.phone) : null, contact?.email ? lookupFor(cid, 'email:' + contact.email) : null, contact ? now : null,
     geo?.lat ?? null, geo?.lng ?? null, geo?.city ?? null, geo?.uf ?? null, geo?.region ?? null, deviceLabel ? String(deviceLabel).slice(0, 80) : null);
     for (const { q, v } of normalized) {
       run('INSERT INTO answers (response_id, question_id, value_num, value_text) VALUES (?,?,?,?)', r.lastInsertRowid, q.id, v.num, v.text);

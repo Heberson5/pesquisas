@@ -10,16 +10,13 @@ function every(name, ms, fn) { jobs.push({ name, ms, fn, last: 0, running: false
 every('outbox', 30_000, () => processOutbox());
 every('limpeza-sessoes', 10 * 60_000, () => {
   run('DELETE FROM sessions WHERE created_at < ? OR last_seen_at < ?', Date.now() - 12 * 3_600_000, Date.now() - 2 * 3_600_000);
-  run('UPDATE devices SET pair_code_hash = NULL WHERE pair_expires_at < ?', Date.now());
+  run('UPDATE devices SET pair_code_hash = NULL WHERE pair_expires_at < ? /* tenant-ok: limpeza de códigos vencidos de todas as empresas */', Date.now());
   run('DELETE FROM mfa_challenges WHERE created_at < ?', Date.now() - 10 * 60_000);
   run('DELETE FROM password_resets WHERE expires_at < ?', Date.now() - 86_400_000);
   run('DELETE FROM link_tickets WHERE issued_at < ?', Date.now() - 2 * 3_600_000);
 });
 
-every('retencao-lgpd', 6 * 3_600_000, () => {
-  const r = require('./retention').applyRetention();
-  if (r.contacts || r.comments || r.audit) require('./db').audit(null, 'lgpd.retention', r, null);
-});
+every('retencao-lgpd', 6 * 3_600_000, () => require('./retention').applyRetention());
 
 every('relatorio-semanal', 10 * 60_000, () => require('./scheduled').sendWeeklyReport());
 every('tablets-sem-sinal', 5 * 60_000, () => require('./scheduled').checkOfflineTablets());

@@ -68,7 +68,7 @@ test('fuso escolhido na filial vale mais que o do tablet; valida entrada; "auto"
   const list = (await admin.req('GET', '/api/admin/branches')).json.find((b) => b.id === branch);
   assert.equal(list.timezone, 'America/Rio_Branco'); assert.equal(list.effective_tz, 'America/Rio_Branco');
   for (const bad of ['Asia/Tokyo', 'Foo/Bar', 5, ['America/Manaus'], 'America/Manaus\r\n']) assert.equal((await put(admin, { timezone: bad })).status, 400, JSON.stringify(bad));
-  assert.equal((await put(gestor, { timezone: 'America/Manaus' })).status, 403, 'gestor não altera a filial');
+  assert.equal((await put(gestor, { timezone: 'America/Manaus' })).status, 200, 'gestor altera a própria unidade');
   assert.equal((await put(admin, { timezone: 'auto' })).status, 200);
   assert.equal(get('SELECT timezone FROM branches WHERE id = ?', branch).timezone, null);
   assert.equal((await cfg('America/Noronha')).json.timezone, 'America/Noronha');

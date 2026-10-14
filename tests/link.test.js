@@ -73,9 +73,10 @@ test('idiomas: traduções validadas; tablet recebe as traduções; idioma invá
   assert.equal(get('SELECT lang FROM responses ORDER BY id DESC LIMIT 1').lang, 'en');
 });
 
-test('link público: desativado por padrão; só admin ativa; gestor de outra filial não vê o QR', async () => {
+test('link público: desativado por padrão; gestor só mexe no da própria unidade e não vê o QR das outras', async () => {
   assert.equal((await gestor.req('GET', `/api/admin/branches/${branch}/public-link`)).status, 404);
-  assert.equal((await gestor.req('POST', `/api/admin/branches/${other}/public-link`, { body: { enabled: true } })).status, 403);
+  assert.equal((await gestor.req('POST', `/api/admin/branches/${branch}/public-link`, { body: { enabled: true } })).status, 404, 'unidade de outro gestor');
+  assert.equal((await gestor.req('POST', `/api/admin/branches/${other}/public-link`, { body: { enabled: false } })).status, 200, 'a própria unidade');
   const on = await admin.req('POST', `/api/admin/branches/${branch}/public-link`, { body: { enabled: true } });
   assert.equal(on.status, 200);
   assert.match(on.json.qr, /^data:image\/png;base64,/);
@@ -131,7 +132,8 @@ test('campanhas: pesquisa agendada substitui a padrão no período; validações
   for (const bad of [{ startsAt: local(10), endsAt: local(5) }, { startsAt: '2026-13-01T08:00', endsAt: local(60) }, { startsAt: local(-120), endsAt: local(-60) }, { startsAt: 'amanhã', endsAt: local(60) }]) {
     assert.equal((await admin.req('POST', '/api/admin/schedules', { body: { surveyId: camp, branchId: branch, ...bad } })).status, 400, JSON.stringify(bad));
   }
-  assert.equal((await gestor.req('POST', '/api/admin/schedules', { body: { surveyId: camp, branchId: other, startsAt: local(-5), endsAt: local(60) } })).status, 403);
+  assert.equal((await gestor.req('POST', '/api/admin/schedules', { body: { surveyId: camp, branchId: branch, startsAt: local(-5), endsAt: local(60) } })).status, 404, 'unidade de outro gestor');
+  assert.equal((await gestor.req('POST', '/api/admin/schedules', { body: { surveyId: camp, startsAt: local(-5), endsAt: local(60) } })).status, 403, 'todas as unidades: só quem vê a empresa inteira');
   const s = await admin.req('POST', '/api/admin/schedules', { body: { surveyId: camp, branchId: branch, startsAt: local(-5), endsAt: local(60) } });
   assert.equal(s.status, 201, s.text);
   const cfg = (await new Client().req('GET', '/api/kiosk/config', { headers: { Authorization: 'Bearer ' + devTok } })).json;

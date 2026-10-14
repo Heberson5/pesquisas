@@ -2,7 +2,7 @@
 // Localização das respostas pelo QR Code: autorização, validação, privacidade (arredondamento/retenção) e filtros.
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { start, stop, Client, makeUser, run, get } = require('./helpers');
+const { start, stop, Client, makeUser, run, get, COMPANY } = require('./helpers');
 const { locate, fromClient } = require('../src/geo');
 const { applyRetention } = require('../src/retention');
 
@@ -108,7 +108,7 @@ test('privacidade: retenção apaga o ponto (mantém cidade/UF) e a anonimizaç�
   assert.equal(row.geo_lat, null); assert.equal(row.geo_city, 'Belo Horizonte');
   const { anonymize } = require('../src/routes/privacy');
   const id = get("SELECT id FROM responses WHERE geo_uf = 'SP' LIMIT 1").id;
-  anonymize([id]);
+  anonymize(COMPANY, [id]);
   assert.equal(get('SELECT geo_lat FROM responses WHERE id = ?', id).geo_lat, null);
 });
 

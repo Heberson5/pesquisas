@@ -6,7 +6,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { execFileSync } = require('node:child_process');
-const { start, stop, Client, makeUser, run, get } = require('./helpers');
+const { start, stop, Client, makeUser, run, get, COMPANY } = require('./helpers');
 
 let admin; let bA; let bB; let devA;
 const pptxText = (buf) => {
@@ -38,7 +38,8 @@ test.before(async () => {
 test.after(stop);
 
 test('relatório semanal: só envia no dia/hora configurados e uma vez por dia', async () => {
-  const { sendWeeklyReport } = require('../src/scheduled');
+  const { sendWeeklyReportFor } = require('../src/scheduled');
+  const sendWeeklyReport = (o = {}) => sendWeeklyReportFor(COMPANY, o);
   assert.equal((await sendWeeklyReport()).skipped, 'desativado');
   await admin.req('PUT', '/api/admin/settings', { body: { weeklyReport: { enabled: true, weekday: 1, hour: 8 } } });
   // Datas relativas a hoje: as respostas foram feitas há 2 dias; o relatório sai na segunda-feira seguinte a elas.
