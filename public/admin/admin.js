@@ -128,9 +128,59 @@
       } catch (ex) { pw.value = ''; throw ex; }
     });
     err.textContent = msg || '';
+    const signup = await fetch('/api/public/signup', { cache: 'no-store' }).then((x) => x.json()).catch(() => ({}));
     await loginShell('Entrar no painel', branding.companyName, form,
-      h('a', { href: '#', class: 'small', onclick: (e) => { e.preventDefault(); showForgot(email.value); } }, 'Esqueci minha senha'));
+      h('a', { href: '#', class: 'small', onclick: (e) => { e.preventDefault(); showForgot(email.value); } }, 'Esqueci minha senha'),
+      signup.enabled ? h('p', { class: 'small mt' }, 'Sua empresa ainda não usa? ', h('a', { href: '#/cadastro' }, `Cadastre-se e teste grátis por ${signup.trialDays} dias`)) : null);
     email.focus();
+  }
+
+  // Autocadastro da empresa (só aparece quando o Master liga em Configurações gerais).
+  async function showSignup() {
+    const startedAt = Date.now();
+    const pub = async (path, opts = {}) => {
+      const res = await fetch('/api/public/signup' + path, { method: opts.method || 'GET', headers: opts.body ? { 'Content-Type': 'application/json' } : {}, body: opts.body ? JSON.stringify(opts.body) : undefined, cache: 'no-store' });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || 'Erro ' + res.status);
+      return data;
+    };
+    const cnpj = h('input', { required: true, inputmode: 'numeric', maxlength: '18', placeholder: '00.000.000/0000-00' });
+    const info = h('div', { class: 'small' });
+    const name = h('input', { required: true, maxlength: '60', placeholder: 'Como sua empresa é conhecida' });
+    const adminName = h('input', { required: true, maxlength: '100', autocomplete: 'name' });
+    const email = h('input', { type: 'email', required: true, autocomplete: 'email' });
+    const pw = h('input', { type: 'password', required: true, autocomplete: 'new-password' });
+    const pw2 = h('input', { type: 'password', required: true, autocomplete: 'new-password' });
+    const terms = h('input', { type: 'checkbox' });
+    const trap = h('input', { tabindex: '-1', autocomplete: 'off', 'aria-hidden': 'true' });
+    cnpj.addEventListener('change', async () => {
+      const d = cnpj.value.replace(/\D/g, '');
+      if (d.length !== 14) return;
+      info.replaceChildren(h('span', { class: 'muted' }, 'Consultando…'));
+      try {
+        const r = await pub('/cnpj/' + d);
+        if (!r.found) return info.replaceChildren(h('span', { class: 'bad' }, r.notFound ? 'CNPJ não encontrado na Receita Federal.' : 'Consulta indisponível agora. Tente em alguns minutos.'));
+        if (!name.value) name.value = (r.tradeName || r.legalName || '').slice(0, 60);
+        info.replaceChildren(h('span', { class: r.active ? 'good' : 'bad' }, `${r.legalName} — ${r.city || ''}/${r.uf || ''} — situação ${r.status}`));
+      } catch (ex) { info.replaceChildren(h('span', { class: 'bad' }, ex.message)); }
+    });
+    const { form, err } = formOf([
+      h('label', { class: 'f' }, 'CNPJ da empresa', cnpj), info, h('label', { class: 'f' }, 'Nome da empresa', name),
+      h('label', { class: 'f' }, 'Seu nome', adminName), h('label', { class: 'f' }, 'Seu e-mail (será o seu login)', email),
+      h('label', { class: 'f' }, 'Senha (mín. 10 caracteres, letras e números)', pw), h('label', { class: 'f' }, 'Repita a senha', pw2),
+      h('label', { class: 'hp' }, 'Não preencha', trap),
+      h('label', { class: 'signup-terms' }, terms, h('span', {}, 'Li e aceito os termos de uso e a política de privacidade da plataforma.')),
+    ], 'Criar conta e começar o teste', async () => {
+      if (pw.value !== pw2.value) throw new Error('As senhas não conferem.');
+      const r = await pub('', { method: 'POST', body: { cnpj: cnpj.value, name: name.value, adminName: adminName.value, email: email.value, password: pw.value,
+        acceptTerms: terms.checked, website: trap.value, startedAt } });
+      history.replaceState(null, '', '/admin/');
+      showLogin(`Conta criada! Seu teste grátis de ${r.trialDays} dias começou. Entre com o seu e-mail e senha.`);
+    });
+    void err;
+    await loginShell('Cadastrar minha empresa', 'Teste grátis, sem cartão. Você será o Administrador da conta da sua empresa.', form,
+      h('a', { href: '#', class: 'small', onclick: (e) => { e.preventDefault(); history.replaceState(null, '', '/admin/'); showLogin(); } }, 'Já tenho conta — entrar'));
+    cnpj.focus();
   }
 
   async function showMfaStep(challenge) {
@@ -236,6 +286,9 @@
   // [rota, rótulo, página, permissão exigida ('master' = só o Master), grupo]
   const PAGES = [
     ['empresas', 'Empresas', pageCompanies, 'master', 'Plataforma'],
+    ['plataforma', 'Configurações gerais', pagePlatform, 'master', 'Plataforma'],
+    ['saude', 'Saúde da plataforma', pageHealth, 'master', 'Plataforma'],
+    ['auditoria-plataforma', 'Auditoria da plataforma', pagePlatformAudit, 'master', 'Plataforma'],
     ['dashboard', 'Visão geral', pageDashboard, 'dashboard.view', 'Análise'],
     ['casos', 'Casos', pageCases, 'cases.manage', 'Análise'],
     ['respostas', 'Respostas', pageResponses, 'dashboard.view', 'Análise'],
@@ -296,6 +349,7 @@
     document.querySelectorAll('.modal-bg').forEach((m) => m.remove()); // janela aberta não sobrevive à troca de página
     const reset = /^#\/redefinir\/([A-Za-z0-9_-]{20,100})$/.exec(location.hash);
     if (reset) return showReset(reset[1]);
+    if (location.hash === '#/cadastro' && !me) return showSignup();
     if (!me) { try { await loadMe(); } catch { return; } }
     const [, name = 'dashboard', param] = location.hash.split('/');
     const visible = PAGES.filter((p) => p[0] === 'conta' || canSee(p));
@@ -1057,28 +1111,259 @@
       } }, 'Sair da empresa'));
   }
 
-  async function pageCompanies() {
+  const STATUS_CLS = { active: 'ok', trial: 'warn', past_due: 'warn', suspended: 'off', canceled: 'off' };
+  const fmtCnpj = (c) => (c ? String(c).replace(/^(\d{2})(\d{3})(\d{3})(\d{4})(\d{2})$/, '$1.$2.$3/$4-$5') : '');
+  const fmtDay = (t) => (t ? new Date(t).toLocaleDateString('pt-BR') : '—');
+
+  // Entrar numa empresa (com motivo) para dar suporte.
+  function enterCompany(c) {
+    const reason = h('input', { maxlength: '200', placeholder: 'Ex.: suporte solicitado pelo cliente por e-mail' });
+    modal('Entrar na empresa ' + c.name, h('div', {},
+      h('p', {}, 'Você verá e poderá alterar os dados desta empresa por até 2 horas. A entrada e tudo o que fizer ficam registrados na auditoria dela.'),
+      h('label', { class: 'f' }, 'Motivo (obrigatório)', reason)),
+    [{ label: 'Entrar', onClick: async (close) => {
+      try { await api('/master/act', { method: 'POST', body: { companyId: c.id, reason: reason.value } }); close(); me = null; location.hash = '#/dashboard'; await route(); } catch (ex) { toast(ex.message, true); }
+    } }]);
+  }
+
+  // Campos do cadastro da empresa (usados no "Nova empresa" e na ficha). Consulta o CNPJ e preenche o que vier da Receita.
+  function companyForm(c = {}, { isNew = false } = {}) {
+    const a = c.address || {};
+    const f = {
+      cnpj: h('input', { value: fmtCnpj(c.cnpj), placeholder: '00.000.000/0000-00', inputmode: 'numeric', maxlength: '18' }),
+      name: h('input', { value: c.name || '', maxlength: '60', placeholder: 'Como aparece no painel' }),
+      legalName: h('input', { value: c.legal_name || '', maxlength: '150' }), tradeName: h('input', { value: c.trade_name || '', maxlength: '150' }),
+      street: h('input', { value: a.street || '', maxlength: '150' }), number: h('input', { value: a.number || '', maxlength: '20' }),
+      complement: h('input', { value: a.complement || '', maxlength: '80' }), district: h('input', { value: a.district || '', maxlength: '80' }),
+      city: h('input', { value: a.city || '', maxlength: '80' }), uf: h('input', { value: a.uf || '', maxlength: '2', placeholder: 'UF' }), cep: h('input', { value: a.cep || '', maxlength: '9', inputmode: 'numeric' }),
+      phone: h('input', { value: c.phone || '', maxlength: '20', inputmode: 'tel' }), contactEmail: h('input', { type: 'email', value: c.contact_email || '' }),
+      billingEmail: h('input', { type: 'email', value: c.billing_email || '', placeholder: 'Para faturas e avisos de cobrança' }),
+      notes: h('textarea', { rows: '2', maxlength: '1000', value: c.notes || '', placeholder: 'Anotações internas (só o Master vê)' }),
+    };
+    const info = h('div', { class: 'small' });
+    const lookup = async () => {
+      info.replaceChildren(h('span', { class: 'muted' }, 'Consultando a Receita Federal…'));
+      try {
+        const r = await api('/master/cnpj/' + f.cnpj.value.replace(/\D/g, ''));
+        f.cnpj.value = r.formatted;
+        if (r.duplicate && r.duplicate.id !== c.id) return info.replaceChildren(h('span', { class: 'bad' }, `Já cadastrado: ${r.duplicate.name} (${r.duplicate.statusLabel}).`));
+        if (r.notFound) return info.replaceChildren(h('span', { class: 'bad' }, 'CNPJ não encontrado na Receita Federal.'));
+        if (r.unavailable) return info.replaceChildren(h('span', { class: 'warn-text' }, 'Consulta indisponível agora. Preencha os dados à mão — o cadastro fica marcado como "não conferido".'));
+        const d = r.data;
+        const set = (el, v) => { if (v && !el.value) el.value = v; };
+        set(f.legalName, d.legalName); set(f.tradeName, d.tradeName); set(f.name, (d.tradeName || d.legalName || '').slice(0, 60));
+        set(f.street, d.address?.street); set(f.number, d.address?.number); set(f.complement, d.address?.complement); set(f.district, d.address?.district);
+        set(f.city, d.address?.city); set(f.uf, d.address?.uf); set(f.cep, d.address?.cep); set(f.phone, d.phone); set(f.contactEmail, d.email);
+        info.replaceChildren(h('span', { class: d.active ? 'good' : 'bad' }, `Situação na Receita: ${d.status || '—'}`, d.active ? ' ✓' : ' — só é possível cadastrar empresa ATIVA.'),
+          h('div', { class: 'muted' }, [d.cnae, d.openedAt ? 'Abertura: ' + d.openedAt.split('-').reverse().join('/') : null, 'Fonte: ' + d.source].filter(Boolean).join(' · ')));
+      } catch (ex) { info.replaceChildren(h('span', { class: 'bad' }, ex.message)); }
+    };
+    f.cnpj.addEventListener('change', () => { if (f.cnpj.value.replace(/\D/g, '').length === 14) lookup(); });
+    const L = (label, el, cls = 'f') => h('label', { class: cls }, label, el);
+    const el = h('div', {},
+      h('div', { class: 'form-grid' }, h('label', { class: 'f' }, 'CNPJ', h('div', { class: 'row' }, f.cnpj, h('button', { class: 'btn secondary sm', type: 'button', onclick: lookup }, 'Consultar'))), info,
+        L('Nome no painel', f.name), L('Razão social', f.legalName), L('Nome fantasia', f.tradeName)),
+      h('h2', { class: 'mt' }, 'Endereço e contato'),
+      h('div', { class: 'form-grid' }, L('Logradouro', f.street), L('Número', f.number), L('Complemento', f.complement), L('Bairro', f.district),
+        L('Cidade', f.city), L('UF', f.uf), L('CEP', f.cep), L('Telefone', f.phone), L('E-mail de contato', f.contactEmail), L('E-mail de cobrança', f.billingEmail)),
+      L('Observações internas', f.notes));
+    const value = () => ({
+      cnpj: f.cnpj.value, name: f.name.value, legalName: f.legalName.value, tradeName: f.tradeName.value,
+      address: { street: f.street.value, number: f.number.value, complement: f.complement.value, district: f.district.value, city: f.city.value, uf: f.uf.value, cep: f.cep.value },
+      phone: f.phone.value, contactEmail: f.contactEmail.value, billingEmail: f.billingEmail.value, notes: f.notes.value,
+    });
+    if (isNew) setTimeout(() => f.cnpj.focus(), 50);
+    return { el, value };
+  }
+
+  async function pageCompanies(param) {
+    if (param) return pageCompany(Number(param));
     const list = await api('/master/companies');
-    const enter = (c) => {
-      const reason = h('input', { maxlength: '200', placeholder: 'Ex.: suporte solicitado pelo cliente por e-mail' });
-      modal('Entrar na empresa ' + c.name, h('div', {},
-        h('p', {}, 'Você verá e poderá alterar os dados desta empresa por até 2 horas. A entrada e tudo o que fizer ficam registrados na auditoria dela.'),
-        h('label', { class: 'f' }, 'Motivo (obrigatório)', reason)),
-      [{ label: 'Entrar', onClick: async (close) => {
-        try { await api('/master/act', { method: 'POST', body: { companyId: c.id, reason: reason.value } }); close(); me = null; location.hash = '#/dashboard'; await route(); } catch (ex) { toast(ex.message, true); }
+    const create = () => {
+      const form = companyForm({}, { isNew: true });
+      const adminName = h('input', { maxlength: '100' }); const adminEmail = h('input', { type: 'email' });
+      const status = h('select', {}, h('option', { value: 'trial' }, 'Em teste grátis'), h('option', { value: 'active' }, 'Ativa (já contratou)'));
+      const days = h('input', { type: 'number', min: '1', max: '90', value: '14' });
+      modal('Nova empresa', h('div', {}, form.el,
+        h('h2', { class: 'mt' }, 'Primeiro administrador (recebe um convite por e-mail para criar a senha)'),
+        h('div', { class: 'form-grid' }, h('label', { class: 'f' }, 'Nome', adminName), h('label', { class: 'f' }, 'E-mail', adminEmail),
+          h('label', { class: 'f' }, 'Situação inicial', status), h('label', { class: 'f' }, 'Dias de teste grátis', days))),
+      [{ label: 'Cadastrar empresa', onClick: async (close) => {
+        try {
+          const r = await api('/master/companies', { method: 'POST', body: { ...form.value(), status: status.value, trialDays: Number(days.value),
+            admin: adminEmail.value ? { name: adminName.value, email: adminEmail.value } : null } });
+          close(); toast(r.manual ? 'Empresa cadastrada (dados não conferidos na Receita).' : 'Empresa cadastrada.' + (r.userId ? ' Convite enviado ao administrador.' : ''));
+          location.hash = '#/empresas/' + r.id;
+        } catch (ex) { toast(ex.message, true); }
       } }]);
     };
-    const STATUS_CLS = { active: 'ok', trial: 'warn', past_due: 'warn', suspended: 'off', canceled: 'off' };
+    const search = h('input', { type: 'search', placeholder: 'Buscar por nome ou CNPJ…' });
+    const stSel = h('select', {}, h('option', { value: '' }, 'Todas as situações'), Object.entries({ trial: 'Em teste', active: 'Ativa', past_due: 'Pagamento em atraso', suspended: 'Suspensa', canceled: 'Cancelada' }).map(([k, l]) => h('option', { value: k }, l)));
+    const body = h('tbody');
+    const draw = () => {
+      const q = search.value.trim().toLowerCase(); const qd = q.replace(/\D/g, '');
+      const rows = list.filter((c) => (!stSel.value || c.status === stSel.value) && (!q || c.name.toLowerCase().includes(q) || (qd && (c.cnpj || '').includes(qd))));
+      body.replaceChildren(...(rows.length ? rows.map((c) => h('tr', {},
+        h('td', {}, h('a', { href: '#/empresas/' + c.id }, h('b', {}, c.name)), h('div', { class: 'small muted' }, c.cnpj ? 'CNPJ ' + fmtCnpj(c.cnpj) : c.slug)),
+        h('td', {}, h('span', { class: 'badge ' + (STATUS_CLS[c.status] || '') }, c.statusLabel), c.status === 'trial' && c.trial_ends_at ? h('div', { class: 'small muted' }, 'até ' + fmtDay(c.trial_ends_at)) : null,
+          c.origin === 'self' ? h('div', { class: 'small muted' }, 'autocadastro') : null),
+        h('td', {}, c.branches), h('td', {}, c.devices), h('td', {}, c.users), h('td', {}, c.responses30d),
+        h('td', {}, h('div', { class: 'row' }, h('a', { class: 'btn secondary sm', href: '#/empresas/' + c.id }, 'Ficha'),
+          me.company?.id === c.id ? h('span', { class: 'badge ok' }, 'Você está aqui') : c.status !== 'canceled' ? h('button', { class: 'btn secondary sm', onclick: () => enterCompany(c) }, 'Entrar') : null))))
+        : [h('tr', {}, h('td', { colspan: '7', class: 'empty' }, list.length ? 'Nenhuma empresa com esses filtros.' : 'Nenhuma empresa cadastrada ainda.'))]));
+    };
+    search.addEventListener('input', draw); stSel.addEventListener('change', draw); draw();
+    const count = (st) => list.filter((c) => c.status === st).length;
     return h('div', {},
-      pageHead('Empresas', 'Clientes da plataforma. Para ver ou ajustar os dados de uma empresa, entre nela informando o motivo.'),
+      pageHead('Empresas', 'Clientes da plataforma. Para ver ou ajustar os dados de uma empresa, entre nela informando o motivo.',
+        h('button', { class: 'btn', onclick: create }, icon('plus', 18), 'Nova empresa')),
+      h('div', { class: 'grid c4' }, [['Ativas', count('active'), 'ok'], ['Em teste', count('trial'), 'warn'], ['Suspensas / atraso', count('suspended') + count('past_due'), 'off'], ['Canceladas', count('canceled'), '']]
+        .map(([l, n, cls]) => h('div', { class: 'card kpi-mini' }, h('div', { class: 'small muted' }, l), h('div', { class: 'kpi-num ' + cls }, String(n))))),
+      h('div', { class: 'card filters' }, h('label', { class: 'f' }, 'Buscar', search), h('label', { class: 'f' }, 'Situação', stSel)),
       h('div', { class: 'card table-wrap' }, h('table', {},
         h('thead', {}, h('tr', {}, h('th', {}, 'Empresa'), h('th', {}, 'Situação'), h('th', {}, 'Unidades'), h('th', {}, 'Tablets'), h('th', {}, 'Usuários'), h('th', {}, 'Respostas (30 dias)'), h('th', {}))),
-        h('tbody', {}, list.length ? list.map((c) => h('tr', {},
-          h('td', {}, h('b', {}, c.name), h('div', { class: 'small muted' }, c.cnpj ? 'CNPJ ' + c.cnpj.replace(/^(\d{2})(\d{3})(\d{3})(\d{4})(\d{2})$/, '$1.$2.$3/$4-$5') : c.slug)),
-          h('td', {}, h('span', { class: 'badge ' + (STATUS_CLS[c.status] || '') }, c.statusLabel)),
-          h('td', {}, c.branches), h('td', {}, c.devices), h('td', {}, c.users), h('td', {}, c.responses30d),
-          h('td', {}, me.company?.id === c.id ? h('span', { class: 'badge ok' }, 'Você está aqui') : h('button', { class: 'btn secondary sm', onclick: () => enter(c) }, 'Entrar'))))
-          : h('tr', {}, h('td', { colspan: '7', class: 'empty' }, 'Nenhuma empresa cadastrada. Use: npm run create-company -- "Nome"'))))));
+        body)));
+  }
+
+  // Confirmação de ação sensível: senha (e código do 2FA, se ativo).
+  const confirmFields = () => {
+    const password = h('input', { type: 'password', autocomplete: 'current-password' });
+    const code = h('input', { inputmode: 'numeric', maxlength: '6', placeholder: 'Se o 2FA estiver ativo' });
+    return { el: h('div', { class: 'form-grid' }, h('label', { class: 'f' }, 'Sua senha', password), h('label', { class: 'f' }, 'Código do aplicativo autenticador', code)),
+      value: () => ({ password: password.value, code: code.value }) };
+  };
+
+  async function pageCompany(cid) {
+    const c = await api('/master/companies/' + cid);
+    const form = companyForm(c);
+    const status = (to, title, text, { needsReason = true, sensitive = false } = {}) => {
+      const reason = h('input', { maxlength: '300', placeholder: 'Motivo (fica na auditoria)' });
+      const conf = sensitive ? confirmFields() : null;
+      modal(title, h('div', {}, h('p', {}, text), needsReason ? h('label', { class: 'f' }, 'Motivo', reason) : null, conf ? conf.el : null),
+        [{ label: 'Confirmar', cls: to === 'canceled' ? 'danger' : '', onClick: async (close) => {
+          try { await api(`/master/companies/${cid}/status`, { method: 'POST', body: { status: to, reason: reason.value, ...(conf ? conf.value() : {}) } }); close(); toast('Situação alterada.'); route(); } catch (ex) { toast(ex.message, true); }
+        } }]);
+    };
+    const purge = () => {
+      const name = h('input', { placeholder: c.name }); const conf = confirmFields();
+      modal('Excluir definitivamente', h('div', {},
+        h('p', { class: 'bad' }, 'Apaga TODOS os dados da empresa (unidades, pesquisas, respostas, usuários, arquivos e a chave de criptografia). Não há como desfazer. O CNPJ fica livre para um novo cadastro.'),
+        h('label', { class: 'f' }, `Digite o nome da empresa: ${c.name}`, name), conf.el),
+      [{ label: 'Excluir tudo', cls: 'danger', onClick: async (close) => {
+        try { await api('/master/companies/' + cid, { method: 'DELETE', body: { confirmName: name.value, ...conf.value() } }); close(); toast('Empresa excluída definitivamente.'); location.hash = '#/empresas'; } catch (ex) { toast(ex.message, true); }
+      } }]);
+    };
+    const invite = () => {
+      const n = h('input', { maxlength: '100' }); const e = h('input', { type: 'email' });
+      modal('Convidar administrador', h('div', { class: 'form-grid' }, h('label', { class: 'f' }, 'Nome', n), h('label', { class: 'f' }, 'E-mail', e),
+        h('p', { class: 'small muted' }, 'A pessoa recebe um link (válido por 7 dias) para criar a própria senha.')),
+      [{ label: 'Enviar convite', onClick: async (close) => {
+        try { await api(`/master/companies/${cid}/admins`, { method: 'POST', body: { name: n.value, email: e.value } }); close(); toast('Convite enviado.'); route(); } catch (ex) { toast(ex.message, true); }
+      } }]);
+    };
+    const extend = () => {
+      const days = h('input', { type: 'number', min: '1', max: '90', value: '7' });
+      modal('Prorrogar teste grátis', h('label', { class: 'f' }, 'Dias a mais', days), [{ label: 'Prorrogar', onClick: async (close) => {
+        try { await api(`/master/companies/${cid}/trial`, { method: 'POST', body: { days: Number(days.value) } }); close(); toast('Teste prorrogado.'); route(); } catch (ex) { toast(ex.message, true); }
+      } }]);
+    };
+    const actions = [];
+    if (c.status !== 'canceled') actions.push(h('button', { class: 'btn secondary', onclick: () => enterCompany(c) }, 'Entrar na empresa'));
+    if (['active', 'trial', 'past_due'].includes(c.status)) actions.push(h('button', { class: 'btn secondary', onclick: () => status('suspended', 'Suspender empresa', 'Os usuários perdem o acesso e os tablets/QR Codes param de aceitar respostas até a reativação.') }, 'Suspender'));
+    if (['suspended', 'past_due', 'trial'].includes(c.status)) actions.push(h('button', { class: 'btn secondary', onclick: () => status('active', 'Ativar empresa', 'A empresa volta a funcionar normalmente.', { needsReason: false }) }, 'Ativar'));
+    if (['trial', 'suspended'].includes(c.status)) actions.push(h('button', { class: 'btn secondary', onclick: extend }, 'Prorrogar teste'));
+    if (c.status !== 'canceled') actions.push(h('button', { class: 'btn danger', onclick: () => status('canceled', 'Cancelar empresa', 'Ninguém da empresa consegue mais entrar e os tablets param. Os dados ficam guardados até a exclusão definitiva.', { sensitive: true }) }, 'Cancelar'));
+    else actions.push(h('button', { class: 'btn secondary', onclick: () => status('active', 'Reativar empresa', 'A empresa volta a funcionar normalmente.', { needsReason: false }) }, 'Reativar'), h('button', { class: 'btn danger', onclick: purge }, 'Excluir definitivamente'));
+    return h('div', {},
+      pageHead(c.name, h('span', {}, h('span', { class: 'badge ' + (STATUS_CLS[c.status] || '') }, c.statusLabel), ' ', c.cnpj ? 'CNPJ ' + fmtCnpj(c.cnpj) : '', c.receita_status ? ` · Receita: ${c.receita_status}` : ' · não conferido na Receita'),
+        h('a', { class: 'btn secondary', href: '#/empresas' }, 'Voltar')),
+      c.status_reason ? h('div', { class: 'card warn-card' }, h('b', {}, 'Motivo da situação: '), c.status_reason) : null,
+      h('div', { class: 'card' }, h('div', { class: 'row wrap' }, actions),
+        h('p', { class: 'small muted mt' }, `Cadastrada em ${fmtDay(c.created_at)}${c.origin === 'self' ? ' pelo autocadastro' : ''}`, c.status === 'trial' && c.trial_ends_at ? ` · teste grátis até ${fmtDay(c.trial_ends_at)}` : '',
+          ` · endereço curto: ${c.slug}`)),
+      h('div', { class: 'grid c4' }, [['Unidades', c.counts.branches], ['Tablets ativos', c.counts.devices], ['Usuários ativos', c.counts.users], ['Respostas', c.counts.responses]]
+        .map(([l, n]) => h('div', { class: 'card kpi-mini' }, h('div', { class: 'small muted' }, l), h('div', { class: 'kpi-num' }, String(n))))),
+      h('div', { class: 'card' }, h('div', { class: 'topbar' }, h('h2', {}, 'Administradores'), h('button', { class: 'btn secondary sm', onclick: invite }, icon('plus', 14), 'Convidar administrador')),
+        c.admins.length ? h('div', { class: 'table-wrap' }, h('table', {}, h('thead', {}, h('tr', {}, ['Nome', 'E-mail', '2FA', 'Situação', ''].map((t) => h('th', {}, t)))),
+          h('tbody', {}, c.admins.map((u) => h('tr', {}, h('td', {}, u.name), h('td', {}, u.email), h('td', {}, u.totp_enabled ? h('span', { class: 'badge ok' }, 'Ativo') : h('span', { class: 'badge warn' }, 'Não')),
+            h('td', {}, h('span', { class: 'badge ' + (u.active ? 'ok' : 'off') }, u.active ? 'Ativo' : 'Inativo')),
+            h('td', {}, h('button', { class: 'btn secondary sm', onclick: async () => {
+              try { await api(`/master/companies/${cid}/admins`, { method: 'POST', body: { userId: u.id } }); toast('Novo convite enviado para ' + u.email); } catch (ex) { toast(ex.message, true); }
+            } }, 'Reenviar convite')))))))
+          : h('p', { class: 'muted' }, 'Nenhum administrador. Convide o responsável pela empresa.')),
+      h('div', { class: 'card' }, h('h2', {}, 'Cadastro'), form.el,
+        h('div', { class: 'row mt' }, h('button', { class: 'btn', onclick: async () => {
+          try { await api('/master/companies/' + cid, { method: 'PUT', body: form.value() }); toast('Cadastro salvo.'); route(); } catch (ex) { toast(ex.message, true); }
+        } }, 'Salvar cadastro'))));
+  }
+
+  // ------------------------------------------------------------ Master: configurações gerais, saúde e auditoria da plataforma
+  async function pagePlatform() {
+    const p = await api('/master/platform');
+    const st = structuredClone(p);
+    const chk = (obj, k, label, hint) => h('label', { class: 'chk' }, h('input', { type: 'checkbox', checked: obj[k], onchange: (e) => { obj[k] = e.target.checked; } }), h('span', {}, label, hint ? h('div', { class: 'small muted' }, hint) : null));
+    const num = (obj, k, min, max) => h('input', { type: 'number', min: String(min), max: String(max), value: obj[k], oninput: (e) => { obj[k] = Number(e.target.value); } });
+    const txt = (obj, k, extra = {}) => h('input', { value: obj[k] ?? '', oninput: (e) => { obj[k] = e.target.value; }, ...extra });
+    const emails = h('textarea', { rows: '2', value: (st.capacity.alertEmails || []).join('\n'), placeholder: 'ti@suaempresa.com.br (um por linha)' });
+    const save = async () => {
+      try {
+        await api('/master/platform', { method: 'PUT', body: {
+          branding: st.branding, signup: st.signup, companyDefaults: st.companyDefaults, security: st.security,
+          capacity: { ...st.capacity, alertEmails: emails.value.split(/[\n,;]+/).map((x) => x.trim()).filter(Boolean) } } });
+        toast('Configurações gerais salvas.'); route();
+      } catch (ex) { toast(ex.message, true); }
+    };
+    const delivery = h('div', {}, h('p', { class: 'muted' }, 'Carregando…'));
+    deliveryTab(null, () => route(), { platform: true }).then((el) => delivery.replaceChildren(el)).catch((ex) => delivery.replaceChildren(h('p', { class: 'bad' }, ex.message)));
+    return h('div', {}, pageHead('Plataforma', 'Configurações gerais que valem para todas as empresas', h('button', { class: 'btn', onclick: save }, 'Salvar')),
+      h('div', { class: 'grid c2' },
+        h('div', { class: 'card' }, h('h2', {}, 'Marca da plataforma'), h('p', { class: 'small muted' }, 'Aparece na tela de login e nos e-mails enviados fora de uma empresa.'),
+          h('div', { class: 'form-grid' }, h('label', { class: 'f' }, 'Nome', txt(st.branding, 'companyName', { maxlength: '60' })),
+            h('label', { class: 'f' }, 'Cor principal', txt(st.branding, 'primaryColor', { type: 'color' })), h('label', { class: 'f' }, 'Cor de destaque', txt(st.branding, 'accentColor', { type: 'color' })))),
+        h('div', { class: 'card' }, h('h2', {}, 'Cadastro de empresas pelo site'),
+          chk(st.signup, 'enabled', 'Permitir que a própria empresa se cadastre', 'Aparece o link "Cadastrar minha empresa" na tela de login. O CNPJ precisa estar ATIVO na Receita.'),
+          h('label', { class: 'f' }, 'Dias de teste grátis', num(st.signup, 'trialDays', 1, 90))),
+        h('div', { class: 'card' }, h('h2', {}, 'Segurança'),
+          chk(st.security, 'masterMfa', 'Exigir verificação em duas etapas (2FA) do Master', 'Recomendado: o Master enxerga todas as empresas.'),
+          chk(st.companyDefaults, 'requireAdminMfa', 'Exigir 2FA dos administradores (padrão das empresas)', 'Cada empresa pode mudar nas configurações dela.')),
+        h('div', { class: 'card' }, h('h2', {}, 'Avisos de capacidade do servidor'),
+          h('p', { class: 'small muted' }, 'Ao passar de 70% (atenção) ou 90% (crítico) de um limite, os Masters recebem um e-mail. Veja em "Saúde".'),
+          h('div', { class: 'form-grid' }, h('label', { class: 'f' }, 'Banco de dados (MB)', num(st.capacity, 'dbLimitMb', 100, 1000000)),
+            h('label', { class: 'f' }, 'Respostas por dia', num(st.capacity, 'responsesPerDayLimit', 100, 100000000)),
+            h('label', { class: 'f' }, 'Tablets ativos', num(st.capacity, 'devicesLimit', 10, 10000000)), h('label', { class: 'f' }, 'Empresas ativas', num(st.capacity, 'companiesLimit', 1, 1000000))),
+          h('label', { class: 'f' }, 'Também avisar (e-mails)', emails))),
+      h('h2', { class: 'mt' }, 'E-mail e WhatsApp padrão da plataforma'),
+      h('p', { class: 'small muted' }, 'Usados pelas empresas que não configurarem os próprios, e para convites, recuperação de senha e avisos da plataforma.'),
+      delivery);
+  }
+
+  async function pageHealth() {
+    const s = await api('/master/health');
+    const LV = { ok: ['ok', 'Normal'], warn: ['warn', 'Atenção'], crit: ['off', 'Crítico'] };
+    return h('div', {}, pageHead('Saúde da plataforma', `Atualizado ${fmtDate(s.at)} · servidor no ar há ${s.uptimeHours} h · Node ${s.node}`, h('button', { class: 'btn secondary', onclick: () => route() }, icon('refresh', 16), 'Atualizar')),
+      h('div', { class: 'card ' + (s.worst === 'ok' ? '' : 'warn-card') }, s.worst === 'ok' ? h('b', {}, 'Tudo dentro dos limites.') : h('b', {}, 'Há indicadores pedindo atenção — veja a recomendação de cada um abaixo.')),
+      h('div', { class: 'grid c2' }, s.indicators.map((i) => h('div', { class: 'card' },
+        h('div', { class: 'topbar' }, h('h2', {}, i.label), h('span', { class: 'badge ' + LV[i.level][0] }, LV[i.level][1])),
+        h('div', { class: 'meter' }, (() => { const bar = h('span', { class: 'meter-fill ' + i.level }); bar.style.width = Math.min(100, i.pct) + '%'; return bar; })()),
+        h('p', {}, i.value, h('span', { class: 'muted' }, ` (${i.pct}%)`)),
+        i.level !== 'ok' ? h('p', { class: 'small' }, h('b', {}, 'O que fazer: '), i.advice) : null))),
+      h('div', { class: 'card' }, h('h2', {}, 'Números gerais'),
+        h('div', { class: 'grid c4' }, [['Empresas', s.counts.companies], ['Usuários ativos', s.counts.users], ['Respostas (total)', s.counts.responses.toLocaleString('pt-BR')],
+          ['Tablets on-line agora', s.counts.devicesOnline], ['Fila de envios', s.counts.outboxPending], ['Envios com falha', s.counts.outboxFailed],
+          ['Carga (1/5/15 min)', s.load.join(' / ') + ` · ${s.cpus} CPU`], ['Memória do sistema', `${Math.round(s.memory.systemFreeMb)} MB livres`]]
+          .map(([l, v]) => h('div', {}, h('div', { class: 'small muted' }, l), h('b', {}, String(v)))))));
+  }
+
+  async function pagePlatformAudit() {
+    const rows = await api('/master/audit?limit=500');
+    const ctx = { branches: new Map(), surveys: new Map(), users: new Map(), devices: new Map() };
+    return h('div', {}, pageHead('Auditoria da plataforma', 'Ações do Master e acessos fora das empresas (cada empresa tem a própria auditoria)'),
+      h('div', { class: 'card table-wrap' }, h('table', {},
+        h('thead', {}, h('tr', {}, ['Quando', 'Quem', 'O que aconteceu', 'De onde'].map((t) => h('th', {}, t)))),
+        h('tbody', {}, rows.length ? rows.map((r) => { const e = auditEvent(r, ctx); return h('tr', { class: e.tone ? 'tone-' + e.tone : '' },
+          h('td', {}, fmtDate(r.at)), h('td', {}, r.name ? h('div', {}, h('b', {}, r.name), h('div', { class: 'small muted' }, r.email)) : h('span', { class: 'muted' }, 'Visitante / sistema')),
+          h('td', {}, h('b', {}, e.title), e.detail ? h('div', { class: 'small muted' }, e.detail) : null), h('td', { class: 'small' }, r.ip || '—')); })
+          : h('tr', {}, h('td', { colspan: '4', class: 'empty' }, 'Nenhum registro.'))))));
   }
 
   // ------------------------------------------------------------ usuários
@@ -1097,6 +1382,9 @@
       const syncRole = () => permBox.classList.toggle('hidden', !full || role.value !== 'gestor');
       role.addEventListener('change', syncRole); syncRole();
       const pw = h('input', { type: 'password', autocomplete: 'new-password', placeholder: u.id ? 'Deixe em branco para manter' : 'Mín. 10 caracteres, letras e números' });
+      // Novo usuário: por padrão recebe convite por e-mail e cria a própria senha.
+      const invite = h('input', { type: 'checkbox', checked: !u.id, onchange: () => { pwLabel.classList.toggle('hidden', invite.checked); } });
+      const pwLabel = h('label', { class: 'f' + (!u.id ? ' hidden' : '') }, 'Senha', pw);
       const active = h('input', { type: 'checkbox', checked: u.id ? !!u.active : true });
       const resetMfa = h('input', { type: 'checkbox' });
       const chosen = new Set(u.branches || []);
@@ -1104,13 +1392,15 @@
         h('input', { type: 'checkbox', checked: chosen.has(b.id), onchange: (e) => { e.target.checked ? chosen.add(b.id) : chosen.delete(b.id); } }), b.name)));
       modal(u.id ? 'Editar usuário' : 'Novo usuário', h('div', { class: 'form-grid' },
         h('label', { class: 'f' }, 'Nome', name), h('label', { class: 'f' }, 'E-mail', email), h('label', { class: 'f' }, 'Perfil', role),
-        h('label', { class: 'f' }, 'Senha', pw), h('label', { class: 'chk' }, active, 'Ativo'),
+        u.id ? null : h('label', { class: 'chk' }, invite, 'Enviar convite por e-mail (a pessoa cria a própria senha)'),
+        pwLabel, h('label', { class: 'chk' }, active, 'Ativo'),
         u.id && u.totp_enabled && u.id !== me.id ? h('label', { class: 'chk', title: 'Use quando a pessoa perdeu o celular' }, resetMfa, 'Resetar 2FA (perdeu o celular)') : null,
         h('div', {}, h('div', { class: 'small muted' }, 'Unidades que o gestor pode ver'), brBox), permBox),
       [{ label: 'Salvar', onClick: async (close) => {
         try {
           await api(u.id ? '/users/' + u.id : '/users', { method: u.id ? 'PUT' : 'POST', body: {
-            name: name.value, email: email.value, role: role.value, password: pw.value || null, active: active.checked, branches: [...chosen], unlock: true, resetMfa: resetMfa.checked,
+            name: name.value, email: email.value, role: role.value, password: !u.id && invite.checked ? null : pw.value || null, invite: !u.id && invite.checked,
+            active: active.checked, branches: [...chosen], unlock: true, resetMfa: resetMfa.checked,
             ...(full && role.value === 'gestor' ? { permissions: [...grants] } : {}) } });
           close(); toast('Usuário salvo.'); route();
         } catch (ex) { toast(ex.message, true); }
@@ -1307,10 +1597,14 @@
     ['brevo', 'Brevo (Sendinblue)', { host: 'smtp-relay.brevo.com', port: 587 }],
     ['sendgrid', 'SendGrid', { host: 'smtp.sendgrid.net', port: 587 }],
   ];
-  async function deliveryTab(st, rerender) {
-    const [d, n] = await Promise.all([api('/settings/delivery'), api('/settings/notifications')]);
-    const origin = (x) => x.source === 'painel' ? h('span', { class: 'badge ok' }, 'Configurado aqui no painel')
-      : x.source === 'servidor' ? h('span', { class: 'badge ok' }, 'Configurado no servidor (.env)') : h('span', { class: 'badge warn' }, 'Não configurado');
+  // E-mail e WhatsApp: da empresa (Configurações) ou o padrão da plataforma (Master → Plataforma).
+  async function deliveryTab(st, rerender, { platform = false } = {}) {
+    const base = platform ? '/master/delivery' : '/settings/delivery';
+    const [d, n] = await Promise.all([api(base), platform ? null : api('/settings/notifications')]);
+    const ownSource = platform ? 'painel' : 'empresa';
+    const ORIGIN = { empresa: ['ok', 'Configurado aqui (só desta empresa)'], painel: ['ok', 'Configurado no painel'],
+      plataforma: ['ok', 'Usando o padrão da plataforma (configure aqui para usar o da sua empresa)'], servidor: ['ok', 'Configurado no servidor (.env)'] };
+    const origin = (x) => { const o = ORIGIN[x.source] || ['warn', 'Não configurado']; return h('span', { class: 'badge ' + o[0] }, o[1]); };
     const field = (label, el, hint) => h('label', { class: 'f' }, label, el, hint ? h('span', { class: 'small muted' }, hint) : null);
 
     // ----- e-mail
@@ -1324,7 +1618,7 @@
     preset.addEventListener('change', () => { const p = SMTP_PRESETS.find((x) => x[0] === preset.value)?.[2]; if (p) { host.value = p.host; port.value = String(p.port); } });
     const saveMail = async () => {
       try {
-        await api('/settings/delivery', { method: 'PUT', body: { smtp: { host: host.value, port: Number(port.value), user: user.value, password: pass.value, from: from.value } } });
+        await api(base, { method: 'PUT', body: { smtp: { host: host.value, port: Number(port.value), user: user.value, password: pass.value, from: from.value } } });
         toast('E-mail salvo. Use "Enviar e-mail de teste" para conferir.'); rerender();
       } catch (ex) { toast(ex.message, true); }
     };
@@ -1338,11 +1632,11 @@
       h('div', { class: 'row' },
         h('button', { class: 'btn', onclick: saveMail }, 'Salvar e-mail'),
         h('button', { class: 'btn secondary', onclick: async () => {
-          try { const r = await api('/settings/test-email', { method: 'POST' }); r.sent ? toast('E-mail de teste enviado para ' + me.email) : toast('Falhou: ' + (r.error || 'erro'), true); rerender(); } catch (ex) { toast(ex.message, true); }
+          try { const r = await api(platform ? '/master/test-email' : '/settings/test-email', { method: 'POST' }); r.sent ? toast('E-mail de teste enviado para ' + me.email) : toast('Falhou: ' + (r.error || 'erro'), true); rerender(); } catch (ex) { toast(ex.message, true); }
         } }, icon('mail', 16), 'Enviar e-mail de teste para mim'),
-        d.smtp.source === 'painel' ? h('button', { class: 'btn danger', onclick: async () => {
+        d.smtp.source === ownSource ? h('button', { class: 'btn danger', onclick: async () => {
           if (!confirm('Remover a configuração de e-mail feita no painel?')) return;
-          try { await api('/settings/delivery', { method: 'PUT', body: { smtp: { clear: true } } }); toast('Configuração removida.'); rerender(); } catch (ex) { toast(ex.message, true); }
+          try { await api(base, { method: 'PUT', body: { smtp: { clear: true } } }); toast('Configuração removida.'); rerender(); } catch (ex) { toast(ex.message, true); }
         } }, 'Remover') : null));
 
     // ----- WhatsApp
@@ -1361,13 +1655,13 @@
         h('li', {}, 'Crie e aprove um modelo de mensagem com 3 variáveis ({{1}} unidade, {{2}} nota, {{3}} link) e informe o nome dele na aba "Alertas e relatórios".')),
       h('div', { class: 'row' },
         h('button', { class: 'btn', onclick: async () => {
-          try { await api('/settings/delivery', { method: 'PUT', body: { whatsapp: { phoneId: phoneId.value, token: token.value } } }); toast('WhatsApp salvo. Use "Testar conexão".'); rerender(); } catch (ex) { toast(ex.message, true); }
+          try { await api(base, { method: 'PUT', body: { whatsapp: { phoneId: phoneId.value, token: token.value } } }); toast('WhatsApp salvo. Use "Testar conexão".'); rerender(); } catch (ex) { toast(ex.message, true); }
         } }, 'Salvar WhatsApp'),
-        d.whatsapp.source === 'painel' ? h('button', { class: 'btn danger', onclick: async () => {
+        d.whatsapp.source === ownSource ? h('button', { class: 'btn danger', onclick: async () => {
           if (!confirm('Remover a configuração de WhatsApp feita no painel?')) return;
-          try { await api('/settings/delivery', { method: 'PUT', body: { whatsapp: { clear: true } } }); toast('Configuração removida.'); rerender(); } catch (ex) { toast(ex.message, true); }
+          try { await api(base, { method: 'PUT', body: { whatsapp: { clear: true } } }); toast('Configuração removida.'); rerender(); } catch (ex) { toast(ex.message, true); }
         } }, 'Remover') : null),
-      d.whatsapp.configured ? h('div', { class: 'row mt' }, testPhone,
+      d.whatsapp.configured && !platform ? h('div', { class: 'row mt' }, testPhone,
         h('button', { class: 'btn secondary', onclick: async () => {
           try {
             const r = await api('/settings/test-whatsapp', { method: 'POST', body: { phone: testPhone.value } });
@@ -1376,6 +1670,7 @@
           } catch (ex) { toast(ex.message, true); }
         } }, 'Testar conexão' + '')) : null);
 
+    if (platform) return h('div', { class: 'grid c2' }, mailCard, waCard);
     // ----- fila
     const queue = h('div', { class: 'card' }, h('h2', {}, 'Fila de envios'),
       h('p', { class: 'small muted' }, `Na fila: ${n.pending} · com falha nos últimos 7 dias: ${n.failed}. Se o servidor de e-mail cair, as mensagens ficam guardadas e são reenviadas sozinhas.`),
@@ -1461,6 +1756,19 @@
       case 'logout': return E('acesso', '', 'Saiu do sistema');
       case 'master.enter_company': return E('acesso', 'warn', 'Master (suporte da plataforma) entrou na empresa', d.reason ? `Motivo informado: ${d.reason}` : '');
       case 'master.leave_company': return E('acesso', '', 'Master (suporte da plataforma) saiu da empresa');
+      case 'company.create': return E('cadastros', '', `Cadastrou a empresa "${d.name || '#' + d.id}"`, [d.cnpj ? 'CNPJ ' + fmtCnpj(d.cnpj) : null, d.manual ? 'dados NÃO conferidos na Receita (consulta fora do ar)' : d.receita ? 'Receita: ' + d.receita : null, d.adminInvited ? 'administrador convidado por e-mail' : null].filter(Boolean).join(' · '));
+      case 'company.update': return E('cadastros', '', `Alterou o cadastro da empresa "${d.name || '#' + d.id}"`, d.changedCnpj ? 'O CNPJ foi trocado.' : '');
+      case 'company.status': return E('cadastros', d.to === 'canceled' || d.to === 'suspended' ? 'bad' : 'warn', `Mudou a situação da empresa: ${({ trial: 'em teste', active: 'ativa', suspended: 'suspensa', canceled: 'cancelada', past_due: 'em atraso' })[d.to] || d.to}`, d.reason ? 'Motivo: ' + d.reason : '');
+      case 'company.trial_extended': return E('cadastros', '', `Prorrogou o teste grátis em ${d.days} dia(s)`, d.until ? 'Até ' + new Date(d.until).toLocaleDateString('pt-BR') : '');
+      case 'company.admin_invited': return E('usuarios', '', `Convidou o administrador ${d.email || ''}`);
+      case 'company.admin_reinvited': return E('usuarios', '', `Reenviou o convite para ${d.email || ''}`);
+      case 'company.purged': return E('dados', 'bad', `Excluiu definitivamente a empresa "${d.name || ''}"`, d.cnpj ? 'CNPJ ' + fmtCnpj(d.cnpj) + ' liberado.' : '');
+      case 'company.self_signup': return E('cadastros', 'ok', `Empresa cadastrada pelo site: ${d.name || ''}`, d.cnpj ? 'CNPJ ' + fmtCnpj(d.cnpj) : '');
+      case 'platform.settings': return E('cadastros', '', 'Alterou as configurações gerais da plataforma', (d.changed || []).join(', '));
+      case 'platform.delivery': return E('cadastros', '', 'Alterou o e-mail/WhatsApp padrão da plataforma');
+      case 'invite.accepted': return E('conta', 'ok', 'Aceitou o convite e criou a senha');
+      case 'confirm.bad_password': return E('conta', 'warn', 'Senha errada ao confirmar uma ação sensível');
+      case 'confirm.bad_code': return E('conta', 'warn', 'Código do 2FA errado ao confirmar uma ação sensível');
       case 'login.company_canceled': return E('acesso', 'bad', 'Tentativa de entrada com a empresa cancelada');
       case 'login.failed': return E('acesso', 'warn', 'Tentativa de entrada recusada', `Senha ou e-mail incorretos${d.email ? ' (e-mail digitado: ' + d.email + ')' : ''}.`);
       case 'login.mfa_failed': return E('acesso', 'warn', 'Código da verificação em duas etapas errado', 'A senha estava certa, mas o código do aplicativo não.');

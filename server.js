@@ -30,6 +30,7 @@ app.get('/api/public/branding', (req, res) => {
   const c = companyBySlug(req.query.empresa);
   res.json(c ? publicBranding(c.id) : platformBranding());
 });
+app.use('/api/public/signup', require('./src/routes/signup'));
 app.use('/api/kiosk', require('./src/routes/kiosk'));
 app.use('/api/link', require('./src/routes/link'));
 app.use('/api/admin', require('./src/routes/auth'));

@@ -148,8 +148,18 @@ CREATE INDEX idx_audit_company ON audit_log(company_id, id);`);
   }
 }
 
+// ---------------------------------------------------------------- 2: cadastro completo da empresa e convites
+// Dados da Receita (endereço, CNAE, situação), contato, observações internas do Master e convite de usuário
+// (link para o próprio usuário criar a senha, reaproveitando a tabela de redefinição de senha).
+function cadastroEmpresa(db) {
+  for (const ddl of ['trade_name TEXT', 'address_json TEXT', 'phone TEXT', 'contact_email TEXT', 'cnae TEXT', 'opened_at TEXT',
+    'receita_status TEXT', 'receita_checked_at INTEGER', 'notes TEXT', "origin TEXT NOT NULL DEFAULT 'master'", 'status_reason TEXT']) addColumn(db, 'companies', ddl);
+  addColumn(db, 'password_resets', "kind TEXT NOT NULL DEFAULT 'reset'");
+}
+
 const MIGRATIONS = [
   { version: 1, name: 'multiempresa', up: multiempresa },
+  { version: 2, name: 'cadastro_empresa', up: cadastroEmpresa },
 ];
 
 function runMigrations(db) {
