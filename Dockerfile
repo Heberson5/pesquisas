@@ -13,12 +13,17 @@ ENV NODE_ENV=production \
     TRUST_PROXY=1 \
     NODE_OPTIONS=--disable-warning=ExperimentalWarning
 WORKDIR /app
-RUN mkdir -p /data /backups && chown node:node /data /backups
+# Atualiza os pacotes do sistema e remove npm/yarn/corepack (não são usados em produção: menos superfície de ataque).
+RUN apk upgrade --no-cache \
+ && rm -rf /usr/local/lib/node_modules/npm /usr/local/lib/node_modules/corepack /usr/local/bin/npm /usr/local/bin/npx \
+           /usr/local/bin/corepack /usr/local/bin/yarn /usr/local/bin/yarnpkg /opt/yarn-* \
+ && mkdir -p /data /backups && chown node:node /data /backups
 COPY --from=deps --chown=root:root /app/node_modules ./node_modules
 COPY --chown=root:root package.json server.js ./
 COPY --chown=root:root src ./src
 COPY --chown=root:root public ./public
 COPY --chown=root:root scripts ./scripts
+COPY --chown=root:root manual ./manual
 USER node
 VOLUME ["/data"]
 EXPOSE 3000

@@ -1,0 +1,37 @@
+# Homologação (staging): uma cópia separada do sistema para testar atualizações ANTES da produção.
+# Banco, arquivos e chaves próprios — nunca use o .env nem o banco da produção aqui.
+# Uso (na mesma VPS ou em outra):
+#   cp .env.example .env.staging   (PUBLIC_URL=https://homologa.seudominio, APP_SECRET NOVO, Mercado Pago com credenciais TEST-)
+#   docker compose -p pesquisa-staging -f docker-compose.staging.yml up -d --build
+#   docker compose -p pesquisa-staging -f docker-compose.staging.yml exec app node scripts/seed-demo.js   (dados de demonstração)
+# O proxy HTTPS (Caddy/nginx) aponta homologa.seudominio para 127.0.0.1:3001.
+services:
+  app:
+    build: .
+    image: pesquisa-satisfacao:staging
+    restart: unless-stopped
+    init: true
+    env_file: .env.staging
+    environment:
+      NODE_ENV: production
+      DATA_DIR: /data
+      # Homologação não envia e-mails/WhatsApp de verdade se você deixar SMTP/WhatsApp em branco no .env.staging.
+    volumes:
+      - pesquisa-staging-data:/data
+    ports:
+      - "127.0.0.1:3001:3000"
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    mem_limit: 384m
+    pids_limit: 200
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+
+volumes:
+  pesquisa-staging-data:

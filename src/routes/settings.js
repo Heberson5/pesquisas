@@ -86,6 +86,11 @@ router.post('/settings/test-whatsapp', admin, testLimiter, async (req, res) => {
   }
 });
 
+// Integridade da auditoria da empresa (corrente de resumos).
+router.get('/audit/verify', requirePerm(P.SETTINGS), (req, res) => {
+  res.json(require('../auditChain').verifyChain(all, req.user.companyId));
+});
+
 // ---------------------------------------------------------------- plano e uso (Administrador)
 router.get('/plan', admin, (req, res) => {
   const { planView, listPlans } = require('../plans');

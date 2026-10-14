@@ -9,7 +9,7 @@ const crypto = require('node:crypto');
 const { get, run } = require('../db');
 const { rateLimiter } = require('../security');
 const { HttpError, bad } = require('../validate');
-const { lookup, sign } = require('../vault');
+const { lookupAll, sign } = require('../vault');
 const { buildConfig, saveResponse } = require('../responses');
 const { BLOCKED } = require('../companies');
 const { deviceLabel } = require('../ua');
@@ -28,8 +28,9 @@ const perBranch = rateLimiter({ windowMs: 60 * 60_000, max: 300, keyFn: (req) =>
 function branchByToken(token) {
   if (!TOKEN_RE.test(token)) throw new HttpError(404, 'Link inválido.');
   // O código do link (HMAC da plataforma) é que diz de qual empresa e unidade é o QR Code.
+  const hashes = lookupAll('link:' + token);
   const b = get(`SELECT b.*, c.status AS company_status FROM branches b JOIN companies c ON c.id = b.company_id
-    WHERE b.public_token_hash = ? AND b.public_enabled = 1 AND b.active = 1 /* tenant-ok: código público aleatório identifica a empresa */`, lookup('link:' + token));
+    WHERE b.public_token_hash IN (${hashes.map(() => '?').join(',')}) AND b.public_enabled = 1 AND b.active = 1 /* tenant-ok: código público aleatório identifica a empresa */`, ...hashes);
   if (!b) throw new HttpError(404, 'Link inválido ou desativado.');
   if (BLOCKED.has(b.company_status)) throw new HttpError(423, 'Pesquisa indisponível no momento.');
   return b;

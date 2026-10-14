@@ -2,7 +2,7 @@
 // Conta do próprio usuário: dados da sessão (/me), sair, trocar senha e preferências de notificação.
 // Funciona também para o Master fora de uma empresa.
 const express = require('express');
-const { get, run, auditReq } = require('../db');
+const { get, all, run, auditReq } = require('../db');
 const { hashPassword, verifyPassword, passwordPolicyError, rateLimiter } = require('../security');
 const { destroySession, destroyUserSessions } = require('../auth');
 const { bad } = require('../validate');
@@ -30,7 +30,7 @@ router.post('/logout', (req, res) => {
 });
 
 router.get('/me', (req, res) => {
-  const u = get('SELECT totp_enabled, notify_detractors, notify_reports, notify_offline, whatsapp FROM users WHERE id = ? /* tenant-ok: linha do próprio usuário logado */', req.user.id);
+  const u = get('SELECT totp_enabled, notify_detractors, notify_reports, notify_offline, whatsapp, seen_version FROM users WHERE id = ? /* tenant-ok: linha do próprio usuário logado */', req.user.id);
   const c = req.user.company;
   res.json({
     user: {
@@ -45,6 +45,7 @@ router.get('/me', (req, res) => {
     questionTypes: QUESTION_TYPES, displays: DISPLAYS, langs: LANG_LABELS, contactModes: CONTACT_MODES,
     grantable: GRANTABLE.map((p) => ({ id: p, label: LABELS[p] })),
     platform: (({ companyName, primaryColor, accentColor }) => ({ companyName, primaryColor, accentColor }))(platformBranding()),
+    version: require('../manual').VERSION, whatsNew: u.seen_version !== require('../manual').VERSION,
     settings: req.user.mfaSetupRequired ? null : settingsFor(req.user),
   });
 });
@@ -65,6 +66,41 @@ router.put('/me/notifications', (req, res) => {
     run('UPDATE users SET whatsapp = ? WHERE id = ? /* tenant-ok: linha do próprio usuário logado */', digits || null, req.user.id);
   }
   res.json({ ok: true });
+});
+
+// ---------------------------------------------------------------- notas de versão e manual (filtrados por perfil)
+const path = require('node:path');
+const manual = require('../manual');
+const MANUAL_IMG = path.join(__dirname, '..', '..', 'manual', 'img');
+router.get('/manual', (req, res) => res.json(manual.forUser(req.user)));
+router.get('/manual/img/:file', (req, res, next) => {
+  // O nome do arquivo vem da lista do manual (nunca da URL): só imagens de seções que a pessoa pode ver.
+  const file = manual.allowedImage(req.user, req.params.file);
+  if (!file) return res.status(404).end();
+  res.sendFile(file, { root: MANUAL_IMG, headers: { 'Cache-Control': 'private, max-age=3600' } }, (e) => e && next(e));
+});
+router.post('/manual/seen', (req, res) => {
+  run('UPDATE users SET seen_version = ? WHERE id = ? /* tenant-ok: linha do próprio usuário logado */', manual.VERSION, req.user.id);
+  res.json({ ok: true });
+});
+
+// Sessões abertas do próprio usuário (aparelhos conectados), com opção de encerrar.
+router.get('/me/sessions', (req, res) => {
+  const rows = all('SELECT rowid AS id, token_hash, created_at, last_seen_at, ip, user_agent FROM sessions WHERE user_id = ? ORDER BY last_seen_at DESC', req.user.id);
+  const recent = all('SELECT at, ip, user_agent FROM login_history WHERE user_id = ? ORDER BY at DESC LIMIT 15', req.user.id);
+  res.json({ sessions: rows.map(({ token_hash: t, ...s }) => ({ ...s, current: t === req.user.sessionHash })), recentLogins: recent });
+});
+router.delete('/me/sessions/:id', (req, res) => {
+  const sid = Number(req.params.id);
+  if (!Number.isInteger(sid) || sid < 1) throw bad('Sessão inválida.');
+  const r = run('DELETE FROM sessions WHERE rowid = ? AND user_id = ? AND token_hash <> ?', sid, req.user.id, req.user.sessionHash);
+  auditReq(req, 'session.revoked', { count: Number(r.changes) });
+  res.json({ ok: true, removed: Number(r.changes) });
+});
+router.post('/me/sessions/revoke-others', (req, res) => {
+  const r = run('DELETE FROM sessions WHERE user_id = ? AND token_hash <> ?', req.user.id, req.user.sessionHash);
+  auditReq(req, 'session.revoked', { count: Number(r.changes), others: true });
+  res.json({ ok: true, removed: Number(r.changes) });
 });
 
 router.post('/me/password', passwordLimiter, (req, res) => {

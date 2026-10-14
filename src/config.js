@@ -26,6 +26,11 @@ if (!appSecret) {
   }
 }
 if (appSecret.length < 32) fail('APP_SECRET precisa ter pelo menos 32 caracteres.');
+// Rotação da chave mestra: durante a troca, a chave antiga fica em APP_SECRET_PREVIOUS só para LER o que ainda
+// não foi regravado (npm run rotate-secret regrava tudo com a nova). Nada novo é gravado com a antiga.
+const appSecretPrevious = env.APP_SECRET_PREVIOUS || null;
+if (appSecretPrevious && appSecretPrevious.length < 32) fail('APP_SECRET_PREVIOUS precisa ter pelo menos 32 caracteres.');
+if (appSecretPrevious && appSecretPrevious === appSecret) fail('APP_SECRET_PREVIOUS deve ser a chave ANTIGA (diferente da atual).');
 
 // PUBLIC_URL: endereço público usado em links de e-mail e QR Codes.
 // Nunca usamos o cabeçalho Host da requisição para isso (evita "host header injection").
@@ -56,6 +61,7 @@ module.exports = {
   isTest: env.NODE_ENV === 'test',
   DATA_DIR,
   appSecret,
+  appSecretPrevious,
   publicUrl,
   smtp,
   whatsapp,

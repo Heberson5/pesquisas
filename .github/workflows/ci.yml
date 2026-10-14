@@ -41,6 +41,10 @@ jobs:
           persist-credentials: false
       - name: Build
         run: docker build -t pesquisa-satisfacao:ci .
+      - name: Vulnerabilidades da imagem (Trivy) — falha em crítica/alta com correção disponível
+        run: |
+          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock aquasec/trivy:0.56.2 \
+            image --no-progress --severity CRITICAL,HIGH --ignore-unfixed --exit-code 1 pesquisa-satisfacao:ci
       - name: Recusa iniciar sem segredos (produção)
         run: |
           out=$(docker run --rm -e NODE_ENV=production pesquisa-satisfacao:ci 2>&1 || true)

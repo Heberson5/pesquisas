@@ -306,3 +306,12 @@ label.f > .small { font-weight: 400; }
 .plan-card.current { border-color: var(--good); }
 .plan-card ul { padding-left: 18px; margin: 8px 0 0; }
 .bad-banner { background: color-mix(in srgb, var(--bad) 12%, var(--surface)); }
+.center { text-align: center; }
+.news li { margin: 6px 0; }
+.manual-sec h2 { margin-top: 0; }
+.manual-imgs { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 14px; margin: 12px 0; }
+.manual-imgs figure { margin: 0; }
+.manual-imgs img { width: 100%; border: 1px solid var(--line); border-radius: 10px; cursor: zoom-in; display: block; }
+.manual-zoom { max-width: min(1100px, 90vw); max-height: 75vh; display: block; }
+.manual-tips { background: var(--surface-2); border-radius: 10px; padding: 8px 12px; }
+.manual-toc { margin: 4px 0; }

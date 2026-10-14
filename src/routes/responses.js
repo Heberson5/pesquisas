@@ -56,6 +56,7 @@ router.delete('/responses/:id', requirePerm(P.DELETE_RESPONSES), (req, res) => {
 // Exclusão em lote do que está filtrado na tela (útil para limpar os testes). Exige digitar a palavra EXCLUIR.
 router.post('/responses/delete-filtered', requirePerm(P.DELETE_RESPONSES), (req, res) => {
   if (req.body?.confirm !== 'EXCLUIR') throw new HttpError(400, 'Digite EXCLUIR para confirmar.');
+  require('./auth').confirmSensitive(req); // exclusão em lote também exige a senha (e o código do 2FA, se ativo)
   const f = responseFilter(req.user, req.body?.filter && typeof req.body.filter === 'object' ? req.body.filter : {});
   const n = tx(() => run(`DELETE FROM responses WHERE company_id = ? AND id IN (SELECT r.id FROM responses r ${f.sql})`, req.user.companyId, ...f.params).changes);
   auditReq(req, 'responses.delete_filtered', { count: Number(n), filter: req.body?.filter || {} });

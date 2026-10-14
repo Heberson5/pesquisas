@@ -321,6 +321,14 @@ router.post('/master/test-email', testLimiter, async (req, res) => {
 
 router.get('/master/health', (req, res) => res.json(health.snapshot()));
 
+// Verifica a corrente de auditoria da plataforma e de todas as empresas.
+router.get('/master/audit/verify', (req, res) => {
+  const { verifyChain } = require('../auditChain');
+  const out = [{ companyId: null, name: 'Plataforma', ...verifyChain(all, null) }];
+  for (const c of all('SELECT id, name FROM companies ORDER BY name')) out.push({ companyId: c.id, name: c.name, ...verifyChain(all, c.id) });
+  res.json({ ok: out.every((x) => x.ok), chains: out });
+});
+
 router.get('/master/audit', (req, res) => {
   const limit = int(req.query.limit || '300', { field: 'limite', min: 1, max: 1000 });
   res.json(all(`SELECT l.id, l.at, l.action, l.detail, l.ip, l.user_id, l.as_master, u.email, u.name FROM audit_log l LEFT JOIN users u ON u.id = l.user_id
