@@ -91,7 +91,7 @@ test('assinatura no cartão: o administrador assina; gestor não; a notificaçã
   const sent = calls.find((c) => c.url.endsWith('/preapproval') && c.method === 'POST').body;
   assert.equal(sent.external_reference, `company:${cid}`); assert.equal(sent.auto_recurring.transaction_amount, plan.price_cents / 100);
   assert.equal(sent.auto_recurring.currency_id, 'BRL'); assert.equal(sent.payer_email, 'adm@bill.local');
-  resources.preapprovals['pre-abc'] = { id: 'pre-abc', status: 'authorized', external_reference: `company:${cid}` };
+  resources.preapprovals['pre-abc'] = { id: 'pre-abc', status: 'authorized', external_reference: `company:${cid}`, last_modified: '2026-10-14T09:00:00Z' };
   assert.equal((await notify('subscription_preapproval', 'pre-abc', { badSig: true })).status, 401, 'assinatura falsa recusada');
   assert.equal(company().mp_preapproval_id, null);
   assert.equal((await notify('subscription_preapproval', 'pre-abc', { ts: Math.floor(Date.now() / 1000) - 7200 })).status, 401, 'notificação velha recusada');
@@ -129,7 +129,8 @@ test('rotina cria a fatura do próximo mês 7 dias antes do vencimento', async (
 test('atraso: em atraso após o vencimento, suspensa no fim do 5º dia útil; painel limitado e tablets param; pagou, volta', async () => {
   const inv = get("SELECT * FROM invoices WHERE company_id = ? AND status = 'open'", cid);
   const deadline = graceDeadline(inv.due_date, 'America/Sao_Paulo');
-  assert.equal(billing.reevaluate(cid, Date.parse(inv.due_date + 'T15:00:00Z') + 86_400_000), 'past_due');
+  assert.equal(billing.reevaluate(cid, Date.parse(inv.due_date + 'T15:00:00Z') + 86_400_000), 'active', 'cartão: 3 dias de tolerância para a cobrança cair');
+  assert.equal(billing.reevaluate(cid, Date.parse(inv.due_date + 'T15:00:00Z') + 4 * 86_400_000), 'past_due');
   assert.equal(company().status, 'past_due');
   assert.equal((await admin.req('GET', '/api/admin/branches')).status, 200, 'em atraso: tudo funciona');
   assert.equal((await kioskCfg()).status, 200);
@@ -190,4 +191,81 @@ test('fim do teste grátis sem assinatura: suspende com a tela de pagamento; sus
   await master.req('POST', `/api/admin/master/companies/${c2}/status`, { body: { status: 'suspended', reason: 'Pedido do cliente' } });
   await billing.runBilling();
   assert.equal(get('SELECT lock_kind, status FROM companies WHERE id = ?', c2).lock_kind, 'manual');
+});
+
+// ---------------------------------------------------------------- correções da revisão independente
+const mkCompany = (name, extra = '') => {
+  const id = newCompany(name);
+  run(`UPDATE companies SET plan_id = ?, status = 'active', billing_method = 'card', billing_day = 10, mp_preapproval_id = ?, mp_preapproval_status = 'authorized' ${extra} WHERE id = ?`, plan.id, 'pre-' + name, id);
+  return id;
+};
+const st = (id) => get('SELECT status, lock_kind, mp_preapproval_status FROM companies WHERE id = ?', id);
+
+test('assinatura cancelada/pausada no Mercado Pago não dá acesso grátis: a fatura continua sendo gerada e vence', async () => {
+  const id = mkCompany('rev-cancelada');
+  resources.preapprovals['pre-rev-cancelada'] = { id: 'pre-rev-cancelada', status: 'cancelled', external_reference: `company:${id}`, last_modified: '2026-10-01T10:00:00Z' };
+  await notify('subscription_preapproval', 'pre-rev-cancelada');
+  assert.equal(st(id).mp_preapproval_status, 'cancelled');
+  const due = billing.addMonthsKeepDay(new Date().toISOString().slice(0, 10), 1, 10);
+  await billing.runBilling(Date.parse(due + 'T15:00:00Z') - 5 * 86_400_000);
+  const inv = get("SELECT * FROM invoices WHERE company_id = ? AND status = 'open'", id);
+  assert.ok(inv, 'fatura criada mesmo com a assinatura cancelada');
+  assert.equal(billing.reevaluate(id, graceDeadline(inv.due_date, 'America/Sao_Paulo') + 4 * 86_400_000), 'suspended');
+});
+
+test('assinatura que volta a ser autorizada depois de pausada é reconhecida (não é tratada como repetida)', async () => {
+  const id = mkCompany('rev-pausa');
+  const send = async (status, when) => { resources.preapprovals['pre-rev-pausa'] = { id: 'pre-rev-pausa', status, external_reference: `company:${id}`, last_modified: when }; return notify('subscription_preapproval', 'pre-rev-pausa'); };
+  await send('authorized', '2026-10-01T10:00:00Z');
+  await send('paused', '2026-10-02T10:00:00Z');
+  assert.equal(st(id).mp_preapproval_status, 'paused');
+  const r = await send('authorized', '2026-10-03T10:00:00Z');
+  assert.notEqual(r.json.duplicate, true);
+  assert.equal(st(id).mp_preapproval_status, 'authorized');
+});
+
+test('cancelar a empresa cancela a assinatura no Mercado Pago; exclusão definitiva recusa assinatura ativa', async () => {
+  const id = mkCompany('rev-cancelar-empresa');
+  run("UPDATE users SET failed_logins = 0, locked_until = NULL WHERE email = 'master@bill.local'");
+  const before = calls.length;
+  const r = await master.req('POST', `/api/admin/master/companies/${id}/status`, { body: { status: 'canceled', reason: 'Encerrou o contrato', password: 'SenhaForte123' } });
+  assert.equal(r.status, 200, r.text);
+  const put = calls.slice(before).find((c) => c.method === 'PUT' && c.url.endsWith('/preapproval/pre-rev-cancelar-empresa'));
+  assert.ok(put && put.body.status === 'cancelled', 'assinatura cancelada no Mercado Pago');
+  assert.equal(st(id).mp_preapproval_status, 'cancelled');
+  const id2 = mkCompany('rev-purge');
+  run("UPDATE companies SET status = 'canceled' WHERE id = ?", id2);
+  assert.equal((await master.req('DELETE', `/api/admin/master/companies/${id2}`, { body: { confirmName: 'rev-purge', password: 'SenhaForte123' } })).status, 409);
+});
+
+test('prorrogar o teste de empresa suspensa manualmente tira a trava (a rotina volta a valer)', async () => {
+  const id = mkCompany('rev-trial', ", status = 'suspended', lock_kind = 'manual'");
+  assert.equal((await master.req('POST', `/api/admin/master/companies/${id}/trial`, { body: { days: 1 } })).status, 200);
+  assert.deepEqual([st(id).status, st(id).lock_kind], ['trial', null]);
+  run("UPDATE companies SET mp_preapproval_status = NULL, mp_preapproval_id = NULL WHERE id = ?", id);
+  assert.equal(billing.reevaluate(id, Date.now() + 3 * 86_400_000), 'suspended', 'teste vencido volta a suspender');
+});
+
+test('fatura vencida não reabre empresa com o teste grátis encerrado', () => {
+  const id = newCompany('rev-teste-encerrado');
+  run("UPDATE companies SET plan_id = ?, status = 'suspended', lock_kind = 'trial_expired' WHERE id = ?", plan.id, id);
+  billing.createInvoice(id, { amountCents: 1000, description: 'Teste', dueDate: '2026-10-12', method: 'pix_boleto' });
+  assert.equal(billing.reevaluate(id, Date.parse('2026-10-14T15:00:00Z')), 'suspended');
+  assert.equal(st(id).lock_kind, 'trial_expired');
+});
+
+test('cobrança do cartão menor que a fatura não dá baixa; troca de plano atualiza o valor da assinatura', async () => {
+  const id = mkCompany('rev-valor');
+  const inv = billing.createInvoice(id, { amountCents: plan.price_cents, description: 'Mês', dueDate: '2026-10-20', method: 'card' });
+  resources.authorized['8801'] = { id: 8801, preapproval_id: 'pre-rev-valor', status: 'processed', transaction_amount: 1, currency_id: 'BRL', payment: { id: 991001, status: 'approved' } };
+  await notify('subscription_authorized_payment', '8801');
+  assert.equal(get('SELECT status FROM invoices WHERE id = ?', inv).status, 'open');
+  resources.authorized['8802'] = { id: 8802, preapproval_id: 'pre-rev-valor', status: 'processed', transaction_amount: plan.price_cents / 100, currency_id: 'BRL', payment: { status: 'approved' } };
+  await notify('subscription_authorized_payment', '8802');
+  assert.equal(get('SELECT status FROM invoices WHERE id = ?', inv).status, 'open', 'sem o número do pagamento, espera');
+  const rede = get("SELECT id, price_cents FROM plans WHERE name = 'Rede'");
+  const before = calls.length;
+  assert.equal((await master.req('POST', `/api/admin/master/companies/${id}/plan`, { body: { planId: rede.id } })).status, 200);
+  const put = calls.slice(before).find((c) => c.method === 'PUT' && c.url.endsWith('/preapproval/pre-rev-valor'));
+  assert.equal(put.body.auto_recurring.transaction_amount, rede.price_cents / 100);
 });

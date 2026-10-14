@@ -140,9 +140,10 @@ function setStatus(companyId, status, reason) {
 // Depois disso o CNPJ fica livre para um novo cadastro.
 const TENANT_TABLES = ['outbox', 'schedules', 'cases', 'responses', 'devices', 'user_branches', 'surveys', 'branches', 'media', 'company_settings', 'users'];
 function purgeCompany(companyId) {
-  const c = get('SELECT id, name, status, cnpj FROM companies WHERE id = ?', companyId);
+  const c = get('SELECT id, name, status, cnpj, mp_preapproval_id, mp_preapproval_status FROM companies WHERE id = ?', companyId);
   if (!c) throw new HttpError(404, 'Empresa não encontrada.');
   if (c.status !== 'canceled') throw new HttpError(409, 'Só é possível excluir definitivamente uma empresa cancelada.');
+  if (c.mp_preapproval_id && c.mp_preapproval_status !== 'cancelled') throw new HttpError(409, 'A assinatura no cartão desta empresa ainda está ativa no Mercado Pago. Cancele a assinatura antes de excluir.');
   const counts = {};
   tx(() => {
     run('DELETE FROM sessions WHERE user_id IN (SELECT id FROM users WHERE company_id = ?)', companyId);

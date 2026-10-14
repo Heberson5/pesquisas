@@ -2072,6 +2072,7 @@
       case 'billing.method': return E('cadastros', '', `Forma de cobrança: ${METHOD[d.method] || d.method}`, [d.billingDay ? 'vencimento dia ' + d.billingDay : null, d.autoInvoice ? 'envio automático' : null].filter(Boolean).join(' · '));
       case 'billing.credentials': return E('cadastros', 'warn', 'Alterou as credenciais do Mercado Pago');
       case 'billing.webhook_rejected': return E('acesso', 'bad', 'Notificação de pagamento recusada', d.reason || '');
+      case 'billing.amount_mismatch': return E('dados', 'bad', 'Cobrança do cartão MENOR que a fatura (não foi dada baixa)', `Esperado ${money(Number(d.expected) || 0)}, recebido ${money(Number(d.received) || 0)}. Confira o valor da assinatura no Mercado Pago.`);
       case 'billing.run_manual': return E('dados', '', 'Rodou a rotina de cobrança manualmente');
       case 'session.revoked': return E('conta', '', `Encerrou ${d.count} sessão(ões) em outros aparelhos`);
       case 'webauthn.added': return E('conta', 'ok', `Cadastrou uma chave de acesso (passkey): ${d.name || ''}`);

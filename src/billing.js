@@ -101,7 +101,10 @@ function reevaluate(companyId, now = Date.now()) {
   const c = get('SELECT * FROM companies WHERE id = ?', companyId);
   if (!c || c.status === 'canceled' || c.lock_kind === 'manual') return c?.status;
   const tz = companyTz(companyId); const day = today(companyId, now);
-  const overdue = all("SELECT id, due_date, amount_cents FROM invoices WHERE company_id = ? AND status = 'open' AND due_date < ? ORDER BY due_date", companyId, day);
+  // Fatura de cartão: tolerância de 3 dias (a cobrança automática pode cair 1 a 3 dias depois do dia 28, ou levar um dia para confirmar).
+  const cardCut = new Date(Date.parse(day + 'T00:00:00Z') - 3 * 86_400_000).toISOString().slice(0, 10);
+  const overdue = all(`SELECT id, due_date, amount_cents FROM invoices WHERE company_id = ? AND status = 'open'
+    AND due_date < (CASE WHEN method = 'card' THEN ? ELSE ? END) ORDER BY due_date`, companyId, cardCut, day);
   const expired = overdue.filter((i) => now >= graceDeadline(i.due_date, tz));
   const paidSomething = !!get("SELECT 1 FROM invoices WHERE company_id = ? AND status = 'paid'", companyId);
   const subscribed = c.mp_preapproval_status === 'authorized';
@@ -115,7 +118,10 @@ function reevaluate(companyId, now = Date.now()) {
     return 'suspended';
   }
   if (overdue.length) {
-    if (c.status === 'active' || c.status === 'trial' || (c.status === 'suspended' && c.lock_kind !== 'manual')) {
+    // Só reabre o acesso de quem estava suspenso POR ATRASO; fim de teste grátis continua bloqueado até pagar.
+    const eligible = c.status === 'active' || c.status === 'trial' || (c.status === 'suspended' && c.lock_kind === 'overdue');
+    if (!eligible) return c.status;
+    {
       const deadline = graceDeadline(overdue[0].due_date, tz);
       setStatusAuto(c, 'past_due', null, `Fatura vencida em ${brDate(overdue[0].due_date)}.`);
       notifyCompany(companyId, { subject: 'fatura vencida', title: 'Sua fatura venceu',
@@ -161,6 +167,12 @@ async function startCardSubscription(companyId, user) {
 function subscriptionPaid(companyId, { paymentId, amountCents }) {
   if (get('SELECT 1 FROM invoices WHERE mp_payment_id = ?', String(paymentId))) return 'já registrado';
   const open = get("SELECT * FROM invoices WHERE company_id = ? AND status = 'open' ORDER BY due_date LIMIT 1", companyId);
+  if (open && amountCents < open.amount_cents) {
+    // Cobrado menos que a fatura (ex.: plano mudou e a assinatura não acompanhou): não dá baixa, avisa o Master.
+    audit(null, 'billing.amount_mismatch', { invoiceId: open.id, expected: open.amount_cents, received: amountCents, paymentId: String(paymentId) }, null, { companyId });
+    audit(null, 'billing.amount_mismatch', { companyId, invoiceId: open.id, expected: open.amount_cents, received: amountCents }, null, { companyId: null });
+    return `valor menor que a fatura (${amountCents} < ${open.amount_cents})`;
+  }
   if (open) { markPaid(open.id, { paymentId: String(paymentId), amountCents, method: 'card' }); return `fatura ${open.id} paga`; }
   const day = today(companyId); const plan = planOf(companyId);
   const id = createInvoice(companyId, { period: get("SELECT 1 FROM invoices WHERE company_id = ? AND period = ? AND status <> 'canceled'", companyId, day.slice(0, 7)) ? null : day.slice(0, 7),
@@ -200,7 +212,8 @@ async function handleNotification(topic, resourceId) {
   }
   if (t === 'subscription_preapproval' || t === 'preapproval') {
     const s = await mp.getPreapproval(resourceId);
-    const key = `preapproval:${s.id}:${s.status}`;
+    // A mesma assinatura pode voltar a um estado anterior (ativa → pausada → ativa): a chave inclui a data da mudança.
+    const key = `preapproval:${s.id}:${s.status}:${s.last_modified || s.date_modified || Date.now()}`;
     if (get('SELECT 1 FROM billing_events WHERE event_key = ?', key)) return { duplicate: true };
     const companyId = parseRef(s.external_reference, 'company');
     const c = companyId ? get('SELECT * FROM companies WHERE id = ?', companyId) : null;
@@ -210,7 +223,7 @@ async function handleNotification(topic, resourceId) {
         const old = c.mp_preapproval_id && c.mp_preapproval_id !== s.id ? c.mp_preapproval_id : null;
         tx(() => {
           run("UPDATE companies SET mp_preapproval_id = NULL WHERE mp_preapproval_id = ? AND id <> ? /* tenant-ok: id da assinatura é único */", s.id, c.id);
-          run("UPDATE companies SET mp_preapproval_id = ?, mp_preapproval_status = 'authorized', billing_method = 'card', billing_day = COALESCE(billing_day, ?), updated_at = ? WHERE id = ?",
+          run("UPDATE companies SET mp_preapproval_id = ?, mp_preapproval_status = 'authorized', billing_method = 'card', billing_day = ?, updated_at = ? WHERE id = ?",
             s.id, Math.min(28, Number(today(c.id).slice(8, 10))), Date.now(), c.id);
         });
         // Cartão trocado: cancela a assinatura anterior para não cobrar duas vezes.
@@ -234,7 +247,8 @@ async function handleNotification(topic, resourceId) {
     if (get('SELECT 1 FROM billing_events WHERE event_key = ?', key)) return { duplicate: true };
     const c = a.preapproval_id ? get('SELECT id FROM companies WHERE mp_preapproval_id = ?', String(a.preapproval_id)) : null;
     let result = `cobrança da assinatura ${payStatus}`;
-    if (c && payStatus === 'approved' && (a.currency_id || 'BRL') === 'BRL') result = subscriptionPaid(c.id, { paymentId: a.payment?.id || `ap-${a.id}`, amountCents: mp.cents(a.transaction_amount) });
+    if (c && payStatus === 'approved' && (a.currency_id || 'BRL') === 'BRL' && !a.payment?.id) result = 'aprovada, aguardando o número do pagamento';
+    else if (c && payStatus === 'approved' && (a.currency_id || 'BRL') === 'BRL') result = subscriptionPaid(c.id, { paymentId: a.payment.id, amountCents: mp.cents(a.transaction_amount) });
     else if (!c) result = 'assinatura desconhecida';
     run('INSERT INTO billing_events (event_key, topic, resource_id, company_id, result, received_at) VALUES (?,?,?,?,?,?)', key, 'authorized_payment', String(a.id), c?.id ?? null, result, Date.now());
     return { result };
@@ -252,7 +266,8 @@ async function runBilling(now = Date.now()) {
     try {
       const plan = planOf(c.id);
       const billable = plan?.priceCents > 0 && c.billing_day && ['active', 'past_due', 'suspended'].includes(c.status) && c.lock_kind !== 'manual'
-        && (c.billing_method === 'pix_boleto' || c.mp_preapproval_status === 'authorized');
+        // Cartão: continua gerando a fatura mesmo com a assinatura pausada/cancelada no Mercado Pago (aí ela vence e o atraso segue o normal).
+        && (c.billing_method === 'pix_boleto' || (c.billing_method === 'card' && !!c.mp_preapproval_id));
       if (billable) {
         const day = today(c.id, now);
         // Próximo vencimento: neste mês (se ainda não passou) ou no próximo.

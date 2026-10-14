@@ -67,10 +67,19 @@ router.put('/master/companies/:id', async (req, res) => {
 });
 
 // Situação: suspender e reativar com motivo; cancelar exige confirmar com senha (e código do 2FA, se ativo).
-router.post('/master/companies/:id/status', (req, res) => {
+router.post('/master/companies/:id/status', async (req, res) => {
   const cid = id(req.params.id);
   const status = String(req.body?.status || '');
-  if (status === 'canceled') confirmSensitive(req);
+  if (status === 'canceled') {
+    confirmSensitive(req);
+    // Cancelou a empresa: a assinatura no cartão é cancelada no Mercado Pago ANTES (senão o cartão seguiria sendo cobrado).
+    const c = get('SELECT mp_preapproval_id, mp_preapproval_status FROM companies WHERE id = ?', cid);
+    if (c?.mp_preapproval_id && c.mp_preapproval_status !== 'cancelled') {
+      await require('../mercadopago').updatePreapproval(c.mp_preapproval_id, { status: 'cancelled' });
+      run("UPDATE companies SET mp_preapproval_status = 'cancelled', updated_at = ? WHERE id = ?", Date.now(), cid);
+      pAudit(req, 'billing.subscription_canceled', { id: cid, preapprovalId: c.mp_preapproval_id, reason: 'empresa cancelada' }, cid);
+    }
+  }
   const before = admin.setStatus(cid, status, req.body?.reason);
   pAudit(req, 'company.status', { id: cid, from: before, to: status, reason: req.body?.reason || null }, cid);
   res.json({ ok: true, status, statusLabel: STATUS_LABEL[status] });
@@ -83,7 +92,9 @@ router.post('/master/companies/:id/trial', (req, res) => {
   const c = get('SELECT status, trial_ends_at FROM companies WHERE id = ?', cid);
   if (!c) throw new HttpError(404, 'Empresa não encontrada.');
   const until = Math.max(Date.now(), c.trial_ends_at || 0) + days * 86_400_000;
-  run("UPDATE companies SET trial_ends_at = ?, status = CASE WHEN status IN ('trial','suspended') THEN 'trial' ELSE status END, updated_at = ? WHERE id = ?", until, Date.now(), cid);
+  run(`UPDATE companies SET trial_ends_at = ?, status = CASE WHEN status IN ('trial','suspended') THEN 'trial' ELSE status END,
+      lock_kind = CASE WHEN status IN ('trial','suspended') THEN NULL ELSE lock_kind END, status_reason = CASE WHEN status IN ('trial','suspended') THEN NULL ELSE status_reason END,
+      updated_at = ? WHERE id = ?`, until, Date.now(), cid);
   pAudit(req, 'company.trial_extended', { id: cid, days, until }, cid);
   res.json({ ok: true, trialEndsAt: until });
 });
@@ -153,13 +164,17 @@ router.delete('/master/plans/:id', (req, res) => {
   res.json({ ok: true });
 });
 // Troca o plano de uma empresa (null = sem limites).
-router.post('/master/companies/:id/plan', (req, res) => {
+router.post('/master/companies/:id/plan', async (req, res) => {
   const cid = id(req.params.id);
-  const c = get('SELECT plan_id FROM companies WHERE id = ?', cid);
+  const c = get('SELECT plan_id, mp_preapproval_id, mp_preapproval_status FROM companies WHERE id = ?', cid);
   if (!c) throw new HttpError(404, 'Empresa não encontrada.');
   const planId = req.body?.planId === null ? null : id(req.body?.planId, 'plano');
-  const p = planId ? get('SELECT name FROM plans WHERE id = ?', planId) : null;
+  const p = planId ? get('SELECT name, price_cents FROM plans WHERE id = ?', planId) : null;
   if (planId && !p) throw bad('Plano inexistente.');
+  // Assinatura no cartão ativa: o valor cobrado acompanha o novo plano (se o Mercado Pago recusar, nada muda).
+  if (c.mp_preapproval_id && ['authorized', 'paused'].includes(c.mp_preapproval_status) && p?.price_cents > 0) {
+    await require('../mercadopago').updatePreapproval(c.mp_preapproval_id, { auto_recurring: { transaction_amount: p.price_cents / 100, currency_id: 'BRL' } });
+  }
   run('UPDATE companies SET plan_id = ?, updated_at = ? WHERE id = ?', planId, Date.now(), cid);
   pAudit(req, 'company.plan', { id: cid, from: c.plan_id, to: planId, plan: p?.name || 'sem limites' }, cid);
   res.json({ ok: true });
