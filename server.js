@@ -34,6 +34,8 @@ app.use('/api/public/signup', require('./src/routes/signup'));
 app.use('/api/webhooks', require('./src/routes/webhooks'));
 app.use('/api/kiosk', require('./src/routes/kiosk'));
 app.use('/api/link', require('./src/routes/link'));
+// Limite geral do painel por IP (além dos limites específicos de login, 2FA, testes, consultas etc.).
+app.use('/api/admin', require('./src/security').rateLimiter({ windowMs: 60_000, max: 600, message: 'Muitas requisições. Aguarde um minuto.' }));
 app.use('/api/admin', require('./src/routes/auth'));
 app.use('/api/admin/cases', require('./src/routes/cases'));
 app.use('/api/admin/privacy', require('./src/routes/privacy'));

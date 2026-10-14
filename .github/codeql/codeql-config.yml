@@ -1,0 +1,8 @@
+name: Configuração do CodeQL
+# js/missing-rate-limiting só reconhece bibliotecas de terceiros (express-rate-limit etc.). Este projeto usa o
+# limitador próprio (src/security.js → rateLimiter): limite geral de 600 req/min por IP em todo /api/admin, mais
+# limites específicos em login, 2FA, recuperação de senha, testes de envio, consultas de CNPJ, etc. Os testes
+# (tests/security.test.js) conferem o bloqueio. Por isso esta regra gera só alertas falsos e fica de fora.
+query-filters:
+  - exclude:
+      id: js/missing-rate-limiting

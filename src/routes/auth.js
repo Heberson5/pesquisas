@@ -214,14 +214,16 @@ router.post('/password/reset', forgotLimiter, (req, res) => {
 
 // ---------------------------------------------------------------- 2FA do próprio usuário (exige login)
 // Configurar ou trocar o 2FA exige a senha atual (protege contra sessão esquecida aberta).
-function requirePassword(req) {
+function verifyCurrentUser(req) {
   const u = get('SELECT * FROM users WHERE id = ? /* tenant-ok: login/2FA: conta do próprio usuário (e-mail é único na plataforma) */', req.user.id);
   if (!verifyPassword(String(req.body?.password || '').slice(0, 200), u.password_hash)) {
     registerFailure(u, req, 'mfa.bad_password');
     throw bad('Senha atual incorreta.');
   }
-  return u;
+  return withoutHash(u);
 }
+// Dados da conta já conferida, sem o resumo da senha (nada adiante precisa dele).
+const withoutHash = ({ password_hash: _hash, ...rest }) => rest;
 
 router.get('/mfa', requireUser, (req, res) => {
   const u = get('SELECT totp_enabled FROM users WHERE id = ? /* tenant-ok: login/2FA: conta do próprio usuário (e-mail é único na plataforma) */', req.user.id);
@@ -230,7 +232,7 @@ router.get('/mfa', requireUser, (req, res) => {
 });
 
 router.post('/mfa/setup', requireUser, mfaLimiter, async (req, res) => {
-  const u = requirePassword(req);
+  const u = verifyCurrentUser(req);
   if (u.totp_enabled) throw new HttpError(409, 'O 2FA já está ativo. Desative antes de configurar um novo aparelho.');
   const secret = totp.generateSecret();
   run('UPDATE users SET totp_secret_enc = ?, totp_last_step = NULL WHERE id = ? /* tenant-ok: login/2FA: conta do próprio usuário (e-mail é único na plataforma) */', encrypt(secret), u.id);
@@ -264,7 +266,7 @@ router.post('/mfa/enable', requireUser, mfaLimiter, (req, res) => {
 });
 
 router.post('/mfa/recovery-codes', requireUser, mfaLimiter, (req, res) => {
-  const u = requirePassword(req);
+  const u = verifyCurrentUser(req);
   if (!u.totp_enabled) throw bad('Ative o 2FA primeiro.');
   const codes = issueRecoveryCodes(u.id);
   audit(u.id, 'mfa.recovery_regenerated', null, req.ip);
@@ -272,7 +274,7 @@ router.post('/mfa/recovery-codes', requireUser, mfaLimiter, (req, res) => {
 });
 
 router.post('/mfa/disable', requireUser, mfaLimiter, (req, res) => {
-  const u = requirePassword(req);
+  const u = verifyCurrentUser(req);
   if (mfaRequiredFor(u)) throw new HttpError(403, u.role === 'master' ? 'O 2FA é obrigatório para o Master.' : 'O 2FA é obrigatório para administradores nesta empresa.');
   const step = totp.verify(decrypt(u.totp_secret_enc) || '', String(req.body?.code || '').trim(), u.totp_last_step);
   if (step === null) throw bad('Código inválido.');
@@ -300,7 +302,7 @@ function confirmSensitive(req) {
     run('UPDATE users SET totp_last_step = ? WHERE id = ? /* tenant-ok: conta do próprio usuário */', step, u.id);
   }
   run('UPDATE users SET failed_logins = 0 WHERE id = ? /* tenant-ok: conta do próprio usuário */', u.id);
-  return u;
+  return withoutHash(u);
 }
 
 // ---------------------------------------------------------------- chaves de acesso (passkeys) do próprio usuário

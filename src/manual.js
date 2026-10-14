@@ -164,9 +164,15 @@ function forUser(user) {
   return { version: VERSION, versions, sections };
 }
 
-// Imagem só sai se pertencer a uma seção que a pessoa pode ver.
-function imageAllowed(user, file) {
-  return SECTIONS.some((s) => allowed(user, s.audience) && (s.images || []).some((i) => i.file === file));
+// Imagem só sai se pertencer a uma seção que a pessoa pode ver. Devolve o nome que está na lista (ou null).
+function allowedImage(user, file) {
+  for (const s of SECTIONS) {
+    if (!allowed(user, s.audience)) continue;
+    const img = (s.images || []).find((i) => i.file === file);
+    if (img) return img.file;
+  }
+  return null;
 }
+const imageAllowed = (user, file) => allowedImage(user, file) !== null;
 
-module.exports = { VERSION, VERSIONS, SECTIONS, forUser, imageAllowed, allowed };
+module.exports = { VERSION, VERSIONS, SECTIONS, forUser, imageAllowed, allowedImage, allowed };

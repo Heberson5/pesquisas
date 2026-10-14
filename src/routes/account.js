@@ -74,9 +74,10 @@ const manual = require('../manual');
 const MANUAL_IMG = path.join(__dirname, '..', '..', 'manual', 'img');
 router.get('/manual', (req, res) => res.json(manual.forUser(req.user)));
 router.get('/manual/img/:file', (req, res, next) => {
-  const f = req.params.file;
-  if (!/^[a-z0-9-]{1,60}\.(jpg|png)$/.test(f) || !manual.imageAllowed(req.user, f)) return res.status(404).end();
-  res.sendFile(path.join(MANUAL_IMG, f), { headers: { 'Cache-Control': 'private, max-age=3600' } }, (e) => e && next(e));
+  // O nome do arquivo vem da lista do manual (nunca da URL): só imagens de seções que a pessoa pode ver.
+  const file = manual.allowedImage(req.user, req.params.file);
+  if (!file) return res.status(404).end();
+  res.sendFile(file, { root: MANUAL_IMG, headers: { 'Cache-Control': 'private, max-age=3600' } }, (e) => e && next(e));
 });
 router.post('/manual/seen', (req, res) => {
   run('UPDATE users SET seen_version = ? WHERE id = ? /* tenant-ok: linha do próprio usuário logado */', manual.VERSION, req.user.id);
